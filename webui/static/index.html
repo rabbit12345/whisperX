@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice-Clone Training Console</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --ink:#1c2126; --muted:#5b6672; --line:#e3e7ec;
+    --accent:#3b6fe0; --ok:#1f9d55; --warn:#c77d0a; --bad:#d1453b; --run:#3b6fe0;
+    --chip:#eef1f6; --shadow:0 1px 2px rgba(0,0,0,.05),0 4px 16px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0f1318;--panel:#161b22;--ink:#e6edf3;--muted:#93a1b0;--line:#242c36;
+      --accent:#5b8cff;--chip:#1e252e;--shadow:0 1px 2px rgba(0,0,0,.3);}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;
+    align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0;font-weight:650}
+  header .sub{color:var(--muted);font-size:12.5px}
+  .wrap{max-width:1180px;margin:0 auto;padding:18px 22px 60px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
+  .tile .k{color:var(--muted);font-size:12px}
+  .tile .v{font-size:22px;font-weight:680;margin-top:2px}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:16px 18px;margin-bottom:20px;box-shadow:var(--shadow)}
+  section h2{font-size:14px;margin:0 0 12px;font-weight:640;display:flex;gap:8px;align-items:center}
+  section h2 .count{color:var(--muted);font-weight:500}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:560;font-size:12px}
+  tbody tr:hover{background:var(--chip)}
+  .scroll{overflow-x:auto}
+  .badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;font-weight:600}
+  .b-include{background:rgba(31,157,85,.14);color:var(--ok)}
+  .b-exclude{background:rgba(209,69,59,.14);color:var(--bad)}
+  .b-uncertain{background:rgba(199,125,10,.16);color:var(--warn)}
+  .b-running{background:rgba(59,111,224,.14);color:var(--run)}
+  .b-done{background:rgba(31,157,85,.14);color:var(--ok)}
+  .b-failed{background:rgba(209,69,59,.14);color:var(--bad)}
+  .b-unknown{background:var(--chip);color:var(--muted)}
+  button{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+    padding:7px 13px;border-radius:9px;cursor:pointer;font-weight:560}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
+    background:var(--bg);color:var(--ink)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+  .row label{color:var(--muted);font-size:12.5px}
+  .grow{flex:1;min-width:180px}
+  .muted{color:var(--muted)}
+  .banner{background:rgba(199,125,10,.12);border:1px solid var(--warn);color:var(--warn);
+    padding:9px 12px;border-radius:9px;font-size:12.5px;margin-bottom:12px}
+  .guests{color:var(--muted);font-size:12px}
+  details summary{cursor:pointer;color:var(--accent)}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;
+    overflow:auto;max-height:340px;font-size:12px;white-space:pre-wrap}
+  .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+  .right{margin-left:auto}
+  .pill{background:var(--chip);border-radius:6px;padding:1px 6px;font-size:11.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙️ Voice-Clone Training Console</h1>
+  <span class="sub" id="paths"></span>
+  <button class="right" onclick="refresh()">↻ Refresh</button>
+</header>
+<div class="wrap">
+  <div class="tiles" id="tiles"></div>
+
+  <section>
+    <h2>Playlist analysis <span class="count" id="anCount"></span></h2>
+    <div id="dlBanner"></div>
+    <div class="row">
+      <input class="grow" id="plInput" placeholder="playlist JSON path (from downloader/yt-dlp -J)  or  playlist URL">
+      <button class="primary" onclick="analyze()">Analyze</button>
+      <span class="muted" id="anStatus"></span>
+    </div>
+    <div class="scroll"><table id="clipTable"><thead><tr>
+      <th></th><th>Status</th><th>Title</th><th>Guest(s)</th><th>Duration</th><th>Video ID</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="row" style="margin-top:12px">
+      <span class="muted" id="selCount">0 selected</span>
+      <button class="right" onclick="downloadSelected(false)">⬇ Download selected</button>
+      <button onclick="downloadSelected(true)">🔁 Download + queue for retrain</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Retrain <span class="count">— fine-tune from MKVs</span></h2>
+    <div class="row">
+      <input class="grow" id="mkvInput" placeholder="MKV paths, comma-separated (or leave blank to use selected downloads)">
+    </div>
+    <div class="row">
+      <label>Mode</label>
+      <select id="mode">
+        <option value="fresh">Fresh — rebuild both voices (Invoke-VoiceClones)</option>
+        <option value="append">Append — add to existing s0/s1 (needs reference)</option>
+      </select>
+      <label>Train</label>
+      <select id="train"><option>both</option><option>female</option><option>male</option></select>
+      <label>Epochs</label>
+      <input id="epochs" type="number" value="100" style="width:80px">
+      <button class="primary right" onclick="retrain()">Start retrain</button>
+    </div>
+    <div id="appendFields" style="display:none">
+      <div class="row">
+        <label>Reference MKV</label><input class="grow" id="refMkv" placeholder="already-diarized reference recording">
+        <label>Speaker</label><select id="refSpk"><option>0</option><option>1</option></select>
+        <label>Dataset</label><select id="dataset"><option>s0</option><option>s1</option></select>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Processing history <span class="count" id="jobCount"></span></h2>
+    <div class="scroll"><table id="jobTable"><thead><tr>
+      <th>When</th><th>Kind</th><th>Status</th><th>Command</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <pre id="joblog" style="display:none"></pre>
+  </section>
+
+  <section>
+    <h2>Training history <span class="count" id="histCount"></span></h2>
+    <div class="scroll"><table id="histTable"><thead><tr>
+      <th>Date</th><th>Dataset</th><th>Epochs</th><th>Train time</th><th>Clips</th>
+      <th>Minutes</th><th>Sources</th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+</div>
+
+<script>
+let STATE={history:[],analysis:null,jobs:[],config:{}};
+const $=s=>document.querySelector(s);
+const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
+const fmtDur=s=>s==null?'—':(s>=3600?(s/3600).toFixed(1)+'h':(s/60).toFixed(0)+'m');
+const fmtDate=s=>s?String(s).replace('T',' ').slice(0,16):'—';
+
+async function refresh(){
+  STATE=await (await fetch('/api/state')).json();
+  $('#paths').textContent=STATE.config.work_dir||'';
+  renderTiles();renderAnalysis();renderJobs();renderHistory();renderDlBanner();
+}
+function renderDlBanner(){
+  $('#dlBanner').innerHTML = STATE.config.download_cmd ? '' :
+    '<div class="banner">⚠ <b>download_cmd</b> is not set in <span class="mono">webui/config.json</span>. '+
+    'Set it to your downloader project’s command using <span class="mono">{video_id}</span> and '+
+    '<span class="mono">{out_dir}</span> to enable downloads.</div>';
+}
+function renderTiles(){
+  const h=STATE.history;
+  const totClips=h.reduce((a,r)=>a+(r.total_clips||0),0);
+  const totSec=h.reduce((a,r)=>a+(r.training_seconds||0),0);
+  const datasets=[...new Set(h.map(r=>r.dataset))];
+  const t=[['Training runs',h.length],['Total clips',totClips],
+    ['Total train time',fmtDur(totSec)],['Datasets',datasets.join(', ')||'—'],
+    ['Jobs',STATE.jobs.length]];
+  $('#tiles').innerHTML='';
+  t.forEach(([k,v])=>{const d=el('div','tile');d.append(el('div','k',k),el('div','v',String(v)));$('#tiles').append(d);});
+}
+function renderAnalysis(){
+  const tb=$('#clipTable tbody');tb.innerHTML='';
+  const a=STATE.analysis;
+  $('#anCount').textContent=a?`— ${a.playlist} · ${a.counts.total} clips`:'';
+  if(!a){tb.append(el('tr','',`<td colspan=6 class=muted>No analysis yet. Enter a playlist JSON path or URL above.</td>`));updateSel();return;}
+  a.clips.forEach((c,i)=>{
+    const tr=el('tr');
+    const cb=el('input');cb.type='checkbox';cb.checked=c.selected;cb.dataset.i=i;cb.onchange=updateSel;
+    const td0=el('td');td0.append(cb);
+    tr.append(td0,
+      el('td','',`<span class="badge b-${c.status}">${c.status}</span>`),
+      el('td','',escapeHtml(c.title||'')),
+      el('td','guests',escapeHtml(c.guests||'')),
+      el('td','',fmtDur(c.duration_sec)),
+      el('td','mono',escapeHtml(c.video_id||'')));
+    tb.append(tr);
+  });
+  updateSel();
+}
+function selectedClips(){
+  return [...document.querySelectorAll('#clipTable tbody input:checked')]
+    .map(cb=>STATE.analysis.clips[cb.dataset.i]);
+}
+function updateSel(){const n=selectedClips().length;$('#selCount').textContent=`${n} selected`;}
+function renderJobs(){
+  const tb=$('#jobTable tbody');tb.innerHTML='';
+  $('#jobCount').textContent=`— ${STATE.jobs.length}`;
+  if(!STATE.jobs.length){tb.append(el('tr','',`<td colspan=5 class=muted>No jobs yet.</td>`));return;}
+  STATE.jobs.forEach(j=>{
+    const tr=el('tr');
+    const btn=el('button',null,'log');btn.onclick=()=>showLog(j.id);
+    const td=el('td');td.append(btn);
+    tr.append(el('td','',fmtDate(j.started)),el('td','',`<span class=pill>${j.kind}</span>`),
+      el('td','',`<span class="badge b-${j.status}">${j.status}</span>`),
+      el('td','mono',escapeHtml((j.cmd||'').slice(0,90))),td);
+    tb.append(tr);
+  });
+}
+function renderHistory(){
+  const tb=$('#histTable tbody');tb.innerHTML='';
+  $('#histCount').textContent=`— ${STATE.history.length}`;
+  if(!STATE.history.length){tb.append(el('tr','',`<td colspan=7 class=muted>No training runs recorded yet.</td>`));return;}
+  [...STATE.history].reverse().forEach(r=>{
+    const srcs=(r.sources||[]).map(s=>`${s.file} (spk${s.speaker}, ${s.clips_kept??'?'} clips, ${s.size_mb??'?'}MB, ${fmtDur(s.duration_sec)})`).join('<br>');
+    const tr=el('tr');
+    tr.append(el('td','',fmtDate(r.timestamp)),el('td','',`<span class=pill>${r.dataset}</span>`),
+      el('td','',r.epochs),el('td','mono',r.training_hms||fmtDur(r.training_seconds)),
+      el('td','',r.total_clips??'—'),el('td','',r.total_minutes??'—'),
+      el('td','',srcs?`<details><summary>${(r.sources||[]).length} source(s)</summary>${srcs}</details>`:'—'));
+    tb.append(tr);
+  });
+}
+async function showLog(id){
+  const j=await (await fetch('/api/jobs/'+id)).json();
+  const pre=$('#joblog');pre.style.display='block';
+  pre.textContent=j.logtext||'(empty)';pre.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function post(url,body){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();if(j.error){alert(j.error);throw new Error(j.error);}return j;
+}
+async function analyze(){
+  const v=$('#plInput').value.trim();if(!v)return alert('Enter a playlist JSON path or URL');
+  $('#anStatus').textContent='analyzing…';
+  const body=/^https?:\/\//.test(v)?{url:v}:{playlist_json:v};
+  const j=await post('/api/analyze',body);await pollJob(j.id);$('#anStatus').textContent='';refresh();
+}
+async function downloadSelected(queue){
+  const ids=selectedClips().map(c=>c.video_id).filter(Boolean);
+  if(!ids.length)return alert('Select clips first');
+  const j=await post('/api/download',{video_ids:ids});showLog(j.id);
+  const done=await pollJob(j.id);
+  if(done.produced&&done.produced.length){
+    $('#mkvInput').value=done.produced.join(', ');
+    if(queue)$('#mkvInput').scrollIntoView({behavior:'smooth',block:'center'});
+  }else if(done.status!=='done'){alert('Download job '+done.status+' — see log');}
+  refresh();
+}
+async function retrain(){
+  const mkvs=$('#mkvInput').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(!mkvs.length)return alert('Enter MKV paths to retrain from');
+  const mode=$('#mode').value;
+  if(mode==='append'){
+    const j=await post('/api/append',{ref_mkv:$('#refMkv').value.trim(),ref_speaker:$('#refSpk').value,
+      extra_mkvs:mkvs,dataset:$('#dataset').value,epochs:+$('#epochs').value});
+    showLog(j.id);pollJob(j.id).then(refresh);
+  }else{
+    const j=await post('/api/retrain',{mkvs,mode,train:$('#train').value,epochs:+$('#epochs').value});
+    showLog(j.id);pollJob(j.id).then(refresh);
+  }
+}
+async function pollJob(id){
+  while(true){const j=await (await fetch('/api/jobs/'+id)).json();
+    if($('#joblog').style.display==='block')$('#joblog').textContent=j.logtext||'';
+    if(j.status!=='running')return j;await new Promise(r=>setTimeout(r,1500));}
+}
+$('#mode').onchange=e=>{$('#appendFields').style.display=e.target.value==='append'?'block':'none';};
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+refresh();setInterval(()=>{if(STATE.jobs.some(j=>j.status==='running'))refresh();},4000);
+</script>
+</body>
+</html>

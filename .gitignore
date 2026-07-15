@@ -1,0 +1,21 @@
+# Virtual environments (multi-GB; installed per-machine)
+.venv-*/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local editor / agent config
+.claude/
+
+# Pipeline working data & artifacts (live outside repo, but guard anyway)
+work/
+downloads/
+webui_jobs/
+*.wav
+*.mkv
+*.pt
+*.safetensors
