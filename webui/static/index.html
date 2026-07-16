@@ -63,6 +63,18 @@
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
   .right{margin-left:auto}
   .pill{background:var(--chip);border-radius:6px;padding:1px 6px;font-size:11.5px;color:var(--muted)}
+  .activity{background:rgba(59,111,224,.10);border:1px solid var(--run);border-radius:12px;
+    padding:12px 16px;margin-bottom:20px}
+  .actrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:3px 0}
+  .actrow .tail{color:var(--muted);flex:1;min-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .spin{width:12px;height:12px;border:2px solid var(--run);border-top-color:transparent;
+    border-radius:50%;display:inline-block;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+  .toolbar button{padding:5px 10px;font-size:12.5px}
+  tr.dl td{opacity:.55}
+  .dlmark{color:var(--ok);font-weight:700}
+  .jobitem{margin:2px 0;font-size:12.5px}
 </style>
 </head>
 <body>
@@ -74,6 +86,8 @@
 <div class="wrap">
   <div class="tiles" id="tiles"></div>
 
+  <div class="activity" id="activity" style="display:none"></div>
+
   <section>
     <h2>Playlist analysis <span class="count" id="anCount"></span></h2>
     <div id="dlBanner"></div>
@@ -82,14 +96,42 @@
       <button class="primary" onclick="analyze()">Analyze</button>
       <span class="muted" id="anStatus"></span>
     </div>
+    <div class="toolbar" id="clipTools" style="display:none">
+      <button onclick="selectAll(true)">Select all</button>
+      <button onclick="selectAll(false)">Deselect all</button>
+      <button onclick="selectUndownloadedIncludes()">✓ Undownloaded includes</button>
+      <span class="muted">tip: shift-click a checkbox to select a range</span>
+    </div>
+    <div class="muted" id="clipStatus" style="font-size:12.5px;margin-bottom:10px"></div>
     <div class="scroll"><table id="clipTable"><thead><tr>
-      <th></th><th>Status</th><th>Title</th><th>Guest(s)</th><th>Duration</th><th>Video ID</th>
+      <th></th><th>Status</th><th>Title</th><th>Guest(s)</th><th>Duration</th><th>Video ID</th><th>State</th>
     </tr></thead><tbody></tbody></table></div>
     <div class="row" style="margin-top:12px">
       <span class="muted" id="selCount">0 selected</span>
       <button class="right" onclick="downloadSelected(false)">⬇ Download selected</button>
-      <button onclick="downloadSelected(true)">🔁 Download + queue for retrain</button>
+      <button onclick="downloadSelected(true)">⬇ Download → training queue</button>
     </div>
+  </section>
+
+  <section>
+    <h2>Training queue <span class="count" id="queueCount"></span></h2>
+    <div class="row">
+      <button class="primary" onclick="trainQueue()">▶ Train queue (append)</button>
+      <label>Epochs</label><input id="qEpochs" type="number" value="100" style="width:80px">
+      <button onclick="clearQueue()">Clear queue</button>
+      <span class="muted">appends the queued MKVs to the accumulated corpus and retrains both voices</span>
+    </div>
+    <div class="scroll"><table id="queueTable"><thead><tr>
+      <th>Clip title</th><th>Video ID</th><th>MKV</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <h2 style="margin-top:18px">Untrained downloads <span class="count" id="untrainedCount"></span></h2>
+    <div class="row">
+      <button onclick="addAllUntrained()">+ Add all untrained to queue</button>
+      <span class="muted">downloaded clips not yet trained and not already queued</span>
+    </div>
+    <div class="scroll"><table id="untrainedTable"><thead><tr>
+      <th>Clip title</th><th>Video ID</th><th>State</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
   </section>
 
   <section>
@@ -100,28 +142,22 @@
     <div class="row">
       <label>Mode</label>
       <select id="mode">
-        <option value="fresh">Fresh — rebuild both voices (Invoke-VoiceClones)</option>
-        <option value="append">Append — add to existing s0/s1 (needs reference)</option>
+        <option value="append">Append — add to accumulated corpus &amp; retrain both (recommended)</option>
+        <option value="fresh">Fresh — train only on the MKVs listed above</option>
       </select>
       <label>Train</label>
       <select id="train"><option>both</option><option>female</option><option>male</option></select>
       <label>Epochs</label>
       <input id="epochs" type="number" value="100" style="width:80px">
-      <button class="primary right" onclick="retrain()">Start retrain</button>
+      <button class="primary right" onclick="startRetrain()">Start retrain</button>
     </div>
-    <div id="appendFields" style="display:none">
-      <div class="row">
-        <label>Reference MKV</label><input class="grow" id="refMkv" placeholder="already-diarized reference recording">
-        <label>Speaker</label><select id="refSpk"><option>0</option><option>1</option></select>
-        <label>Dataset</label><select id="dataset"><option>s0</option><option>s1</option></select>
-      </div>
-    </div>
+    <div class="muted" id="modeHelp" style="font-size:12px"></div>
   </section>
 
   <section>
     <h2>Processing history <span class="count" id="jobCount"></span></h2>
     <div class="scroll"><table id="jobTable"><thead><tr>
-      <th>When</th><th>Kind</th><th>Status</th><th>Command</th><th></th>
+      <th>When</th><th>Kind</th><th>Status</th><th>Clip title</th><th>Video ID</th><th></th>
     </tr></thead><tbody></tbody></table></div>
     <pre id="joblog" style="display:none"></pre>
   </section>
@@ -136,16 +172,97 @@
 </div>
 
 <script>
-let STATE={history:[],analysis:null,jobs:[],config:{}};
+let STATE={history:[],analysis:null,jobs:[],config:{},downloaded:[],trained_ids:[],clip_status:{},training_queue:[],downloads:{}};
+const basename=s=>s?String(s).split(/[\\/]/).pop():'';
+let epochsInit=false;
 const $=s=>document.querySelector(s);
 const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
 const fmtDur=s=>s==null?'—':(s>=3600?(s/3600).toFixed(1)+'h':(s/60).toFixed(0)+'m');
 const fmtDate=s=>s?String(s).replace('T',' ').slice(0,16):'—';
+const dlSet=()=>new Set(STATE.downloaded||[]);
+const trSet=()=>new Set(STATE.trained_ids||[]);
+const cs=()=>STATE.clip_status||{};
+const STATE_LABEL={trained:'trained',training:'in training',downloading:'downloading',
+  queued:'queued',downloaded:'downloaded',failed:'failed'};
+function stateBadge(s){
+  if(!s) return '';
+  if(s==='downloaded') return '<span class="dlmark">✓ downloaded</span>';
+  const cls=s==='trained'?'b-done':s==='failed'?'b-failed':s==='queued'?'b-uncertain':'b-running';
+  return `<span class="badge ${cls}">${STATE_LABEL[s]||s}</span>`;
+}
+const HANDLED=new Set(['downloaded','trained','training','downloading','queued']);
+function elapsed(iso){if(!iso)return'';const d=Math.max(0,(Date.now()-new Date(iso).getTime())/1000);
+  const h=Math.floor(d/3600),m=Math.floor(d%3600/60),s=Math.floor(d%60);
+  return(h?h+'h ':'')+(h||m?m+'m ':'')+s+'s';}
 
 async function refresh(){
   STATE=await (await fetch('/api/state')).json();
   $('#paths').textContent=STATE.config.work_dir||'';
-  renderTiles();renderAnalysis();renderJobs();renderHistory();renderDlBanner();
+  if(!epochsInit&&STATE.config.default_epochs){$('#epochs').value=STATE.config.default_epochs;epochsInit=true;}
+  renderTiles();renderActivity();renderAnalysis();renderQueue();renderJobs();renderHistory();renderDlBanner();updateModeHelp();
+}
+function renderQueue(){
+  const q=STATE.training_queue||[],status=cs();
+  $('#queueCount').textContent=`— ${q.length}`;
+  const qtb=$('#queueTable tbody');qtb.innerHTML='';
+  if(!q.length)qtb.append(el('tr','',`<td colspan=4 class=muted>Queue empty — add untrained downloads below.</td>`));
+  q.forEach(it=>{
+    const tr=el('tr');
+    const btn=el('button',null,'✕ remove');btn.onclick=()=>removeFromQueue(it.mkv);
+    const td=el('td');td.append(btn);
+    tr.append(el('td','',escapeHtml(it.title||basename(it.mkv)||'(unknown)')),
+      el('td','mono muted',escapeHtml(it.video_id||'')),
+      el('td','mono muted',escapeHtml(it.mkv||'')),td);
+    qtb.append(tr);
+  });
+  // untrained downloads not already queued
+  const dls=STATE.downloads||{};
+  const qIds=new Set(q.map(x=>x.video_id)),qMkv=new Set(q.map(x=>x.mkv));
+  const untrained=Object.entries(dls).filter(([id,m])=>
+    status[id]==='downloaded'&&!qIds.has(id)&&!qMkv.has(m.final_path));
+  $('#untrainedCount').textContent=`— ${untrained.length}`;
+  const utb=$('#untrainedTable tbody');utb.innerHTML='';
+  if(!untrained.length)utb.append(el('tr','',`<td colspan=4 class=muted>No untrained downloads.</td>`));
+  untrained.forEach(([id,m])=>{
+    const tr=el('tr');
+    const btn=el('button',null,'+ queue');btn.onclick=()=>addToQueue([{video_id:id,title:m.title,mkv:m.final_path}]);
+    const td=el('td');td.append(btn);
+    tr.append(el('td','',escapeHtml(m.title||basename(m.final_path))),
+      el('td','mono muted',escapeHtml(id)),
+      el('td','',stateBadge('downloaded')),td);
+    utb.append(tr);
+  });
+}
+async function addToQueue(items){await post('/api/queue',{action:'add',items});refresh();}
+async function addAllUntrained(){
+  const dls=STATE.downloads||{},status=cs(),qIds=new Set((STATE.training_queue||[]).map(x=>x.video_id));
+  const items=Object.entries(dls).filter(([id])=>status[id]==='downloaded'&&!qIds.has(id))
+    .map(([id,m])=>({video_id:id,title:m.title,mkv:m.final_path}));
+  if(!items.length)return alert('No untrained downloads to add');
+  await post('/api/queue',{action:'add',items});refresh();
+}
+async function removeFromQueue(mkv){await post('/api/queue',{action:'remove',mkv});refresh();}
+async function clearQueue(){if(!confirm('Clear the training queue?'))return;await post('/api/queue',{action:'clear'});refresh();}
+async function trainQueue(){
+  if(!(STATE.training_queue||[]).length)return alert('Training queue is empty');
+  const j=await post('/api/queue',{action:'train',mode:'append',train:'both',epochs:+($('#qEpochs').value||100)});
+  showLog(j.id);pollJob(j.id).then(refresh);
+}
+function renderActivity(){
+  const running=(STATE.jobs||[]).filter(j=>j.status==='running');
+  const box=$('#activity');
+  if(!running.length){box.style.display='none';box.innerHTML='';return;}
+  box.style.display='block';
+  box.innerHTML='<b>Current activity</b>'+running.map(j=>
+    `<div class="actrow"><span class="spin"></span><span class="badge b-running">${j.kind}</span>`+
+    `<span class="muted">${elapsed(j.started)}</span>`+
+    `<button onclick="showLog('${j.id}')">log</button>`+
+    `<span class="mono tail" id="tail-${j.id}">…</span></div>`).join('');
+  running.forEach(async j=>{        // pull the last log line so training progress is visible live
+    try{const d=await (await fetch('/api/jobs/'+j.id)).json();
+      const last=(d.logtext||'').trim().split('\n').filter(x=>x.trim()).pop()||'';
+      const t=document.getElementById('tail-'+j.id);if(t)t.textContent=last.slice(-140);
+    }catch{}});
 }
 function renderDlBanner(){
   $('#dlBanner').innerHTML = STATE.config.download_cmd ? '' :
@@ -164,24 +281,55 @@ function renderTiles(){
   $('#tiles').innerHTML='';
   t.forEach(([k,v])=>{const d=el('div','tile');d.append(el('div','k',k),el('div','v',String(v)));$('#tiles').append(d);});
 }
+let lastIdx=null;
 function renderAnalysis(){
   const tb=$('#clipTable tbody');tb.innerHTML='';
   const a=STATE.analysis;
   $('#anCount').textContent=a?`— ${a.playlist} · ${a.counts.total} clips`:'';
-  if(!a){tb.append(el('tr','',`<td colspan=6 class=muted>No analysis yet. Enter a playlist JSON path or URL above.</td>`));updateSel();return;}
+  $('#clipTools').style.display=a?'flex':'none';
+  if(!a){tb.append(el('tr','',`<td colspan=7 class=muted>No analysis yet. Enter a playlist JSON path or URL above.</td>`));updateSel();return;}
+  const status=cs();lastIdx=null;
   a.clips.forEach((c,i)=>{
-    const tr=el('tr');
-    const cb=el('input');cb.type='checkbox';cb.checked=c.selected;cb.dataset.i=i;cb.onchange=updateSel;
+    const st=status[c.video_id];
+    const tr=el('tr',HANDLED.has(st)?'dl':'');
+    const cb=el('input');cb.type='checkbox';cb.checked=c.selected&&!HANDLED.has(st);cb.dataset.i=i;
+    cb.onclick=e=>onCheck(e,i);
     const td0=el('td');td0.append(cb);
+    const state=stateBadge(st);
     tr.append(td0,
       el('td','',`<span class="badge b-${c.status}">${c.status}</span>`),
       el('td','',escapeHtml(c.title||'')),
       el('td','guests',escapeHtml(c.guests||'')),
       el('td','',fmtDur(c.duration_sec)),
-      el('td','mono',escapeHtml(c.video_id||'')));
+      el('td','mono',escapeHtml(c.video_id||'')),
+      el('td','',state));
     tb.append(tr);
   });
+  // concise status summary across the analyzed clips
+  const cnt={downloading:0,downloaded:0,queued:0,training:0,trained:0,failed:0};
+  a.clips.forEach(c=>{const s=status[c.video_id];if(s in cnt)cnt[s]++;});
+  $('#clipStatus').innerHTML=
+    `State: ${stateBadge('trained')} ${cnt.trained} · ${stateBadge('training')} ${cnt.training} · `+
+    `${stateBadge('queued')} ${cnt.queued} · ${stateBadge('downloading')} ${cnt.downloading} · `+
+    `${stateBadge('downloaded')} ${cnt.downloaded}`+
+    (cnt.failed?` · ${stateBadge('failed')} ${cnt.failed}`:'')+
+    ` &nbsp;—&nbsp; queued = staged for the next retrain; trained = already used to train`;
   updateSel();
+}
+function boxes(){return [...document.querySelectorAll('#clipTable tbody input[type=checkbox]')];}
+function onCheck(e,i){                 // shift-click selects a range from the last click
+  if(e.shiftKey&&lastIdx!==null){
+    const bs=boxes(),[a,b]=[Math.min(lastIdx,i),Math.max(lastIdx,i)],val=e.target.checked;
+    bs.forEach(cb=>{const k=+cb.dataset.i;if(k>=a&&k<=b)cb.checked=val;});
+  }
+  lastIdx=i;updateSel();
+}
+function selectAll(val){boxes().forEach(cb=>cb.checked=val);lastIdx=null;updateSel();}
+function selectUndownloadedIncludes(){  // pick include-status clips not yet downloaded/queued/trained
+  const status=cs();
+  boxes().forEach(cb=>{const c=STATE.analysis.clips[+cb.dataset.i];
+    cb.checked=c.status==='include'&&!HANDLED.has(status[c.video_id]);});
+  lastIdx=null;updateSel();
 }
 function selectedClips(){
   return [...document.querySelectorAll('#clipTable tbody input:checked')]
@@ -191,14 +339,42 @@ function updateSel(){const n=selectedClips().length;$('#selCount').textContent=`
 function renderJobs(){
   const tb=$('#jobTable tbody');tb.innerHTML='';
   $('#jobCount').textContent=`— ${STATE.jobs.length}`;
-  if(!STATE.jobs.length){tb.append(el('tr','',`<td colspan=5 class=muted>No jobs yet.</td>`));return;}
+  if(!STATE.jobs.length){tb.append(el('tr','',`<td colspan=6 class=muted>No jobs yet.</td>`));return;}
+  // video_id -> title from the current analysis, so download jobs can show titles
+  // even before per-item results are parsed (running / older jobs).
+  const titleMap={};(STATE.analysis?STATE.analysis.clips:[]).forEach(c=>{titleMap[c.video_id]=c.title;});
+  const kindLabel={analyze:'playlist analysis',retrain:'retrain',
+    'retrain-append':'retrain (append)',download:'download'};
+  function jobItems(j){
+    if(Array.isArray(j.items)&&j.items.length) return j.items;   // parsed results
+    const ids=[...(j.cmd||'').matchAll(/YTDL_ID=([^']+)/g)].map(m=>m[1]);  // derive from cmd markers
+    return ids.map(id=>({video_id:id,title:titleMap[id]||null,status:null}));
+  }
+  function itemBadge(it,j){
+    const s=cs()[it.video_id];
+    if(s) return stateBadge(s);
+    if(it.status==='failed'||it.status==='cancelled') return `<span class="badge b-failed">${it.status}</span>`;
+    if(j.status==='running') return '<span class="badge b-running">downloading</span>';
+    return it.status?`<span class="badge b-done">${it.status}</span>`:'';
+  }
   STATE.jobs.forEach(j=>{
     const tr=el('tr');
     const btn=el('button',null,'log');btn.onclick=()=>showLog(j.id);
     const td=el('td');td.append(btn);
+    let titleCell,idCell='';
+    if(j.kind==='download'){
+      const items=jobItems(j);
+      titleCell=items.map(it=>`<div class="jobitem">${itemBadge(it,j)} `+
+        `${escapeHtml(it.title||'(title unknown)')}</div>`).join('')||'<span class="muted">—</span>';
+      idCell=items.map(it=>`<div class="jobitem mono muted">${escapeHtml(it.video_id||'')}</div>`).join('');
+    }else{
+      const n=(j.cmd||'').split('.mkv').length-1;   // rough MKV count for retrain rows
+      const extra=(j.kind.startsWith('retrain')&&n)?` · ${n} MKV(s)`:'';
+      titleCell=`<span class="muted">${kindLabel[j.kind]||j.kind}${extra}</span>`;
+    }
     tr.append(el('td','',fmtDate(j.started)),el('td','',`<span class=pill>${j.kind}</span>`),
       el('td','',`<span class="badge b-${j.status}">${j.status}</span>`),
-      el('td','mono',escapeHtml((j.cmd||'').slice(0,90))),td);
+      el('td','',titleCell),el('td','',idCell),td);
     tb.append(tr);
   });
 }
@@ -231,36 +407,39 @@ async function analyze(){
   const body=/^https?:\/\//.test(v)?{url:v}:{playlist_json:v};
   const j=await post('/api/analyze',body);await pollJob(j.id);$('#anStatus').textContent='';refresh();
 }
-async function downloadSelected(queue){
+async function downloadSelected(toQueue){
   const ids=selectedClips().map(c=>c.video_id).filter(Boolean);
   if(!ids.length)return alert('Select clips first');
   const j=await post('/api/download',{video_ids:ids});showLog(j.id);
   const done=await pollJob(j.id);
-  if(done.produced&&done.produced.length){
+  if(toQueue&&done.produced&&done.produced.length){
+    // stage the freshly downloaded clips in the training queue (train them later)
+    await post('/api/queue',{action:'add',video_ids:ids});
+  }else if(done.produced&&done.produced.length){
     $('#mkvInput').value=done.produced.join(', ');
-    if(queue)$('#mkvInput').scrollIntoView({behavior:'smooth',block:'center'});
   }else if(done.status!=='done'){alert('Download job '+done.status+' — see log');}
   refresh();
 }
-async function retrain(){
-  const mkvs=$('#mkvInput').value.split(',').map(s=>s.trim()).filter(Boolean);
-  if(!mkvs.length)return alert('Enter MKV paths to retrain from');
+async function startRetrain(mkvsOverride){
+  const mkvs=Array.isArray(mkvsOverride)?mkvsOverride
+    :$('#mkvInput').value.split(',').map(s=>s.trim()).filter(Boolean);
   const mode=$('#mode').value;
-  if(mode==='append'){
-    const j=await post('/api/append',{ref_mkv:$('#refMkv').value.trim(),ref_speaker:$('#refSpk').value,
-      extra_mkvs:mkvs,dataset:$('#dataset').value,epochs:+$('#epochs').value});
-    showLog(j.id);pollJob(j.id).then(refresh);
-  }else{
-    const j=await post('/api/retrain',{mkvs,mode,train:$('#train').value,epochs:+$('#epochs').value});
-    showLog(j.id);pollJob(j.id).then(refresh);
-  }
+  if(!mkvs.length&&mode==='fresh')return alert('Enter MKV paths to retrain from');
+  const j=await post('/api/retrain',{mkvs,mode,train:$('#train').value,epochs:+$('#epochs').value});
+  showLog(j.id);pollJob(j.id).then(refresh);
 }
 async function pollJob(id){
   while(true){const j=await (await fetch('/api/jobs/'+id)).json();
     if($('#joblog').style.display==='block')$('#joblog').textContent=j.logtext||'';
     if(j.status!=='running')return j;await new Promise(r=>setTimeout(r,1500));}
 }
-$('#mode').onchange=e=>{$('#appendFields').style.display=e.target.value==='append'?'block':'none';};
+function updateModeHelp(){
+  const append=$('#mode').value==='append';
+  $('#modeHelp').innerHTML=append
+    ?`Trains both voices on <b>all ${STATE.trained_count||0} previously-used MKV(s) + the new ones</b> (deduped — no episode trained twice). No reference MKV needed.`
+    :'Trains both voices on <b>only the MKVs listed above</b>, ignoring past runs.';
+}
+$('#mode').onchange=updateModeHelp;
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 refresh();setInterval(()=>{if(STATE.jobs.some(j=>j.status==='running'))refresh();},4000);
 </script>

@@ -84,7 +84,11 @@ function Add-HistoryRecord([string]$file, $record) {
   }
   $list += [pscustomobject]$record
   New-Item -ItemType Directory -Force -Path (Split-Path $file) | Out-Null
-  ($list | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $file -Encoding UTF8
+  # ConvertTo-Json collapses a 1-element array into a bare object; force array form
+  # so consumers always get a JSON list.
+  $json = @($list) | ConvertTo-Json -Depth 8
+  if (@($list).Count -eq 1) { $json = "[$json]" }
+  $json | Set-Content -LiteralPath $file -Encoding UTF8
 }
 
 # Per-source metadata gathered during the build stage (empty when dataset reused).
