@@ -19,3 +19,5 @@ webui_jobs/
 *.mkv
 *.pt
 *.safetensors
+
+HF_Token.txt

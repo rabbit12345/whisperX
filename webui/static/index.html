@@ -40,6 +40,8 @@
   .b-exclude{background:rgba(209,69,59,.14);color:var(--bad)}
   .b-uncertain{background:rgba(199,125,10,.16);color:var(--warn)}
   .b-running{background:rgba(59,111,224,.14);color:var(--run)}
+  .b-queued{background:rgba(199,125,10,.16);color:var(--warn)}
+  .b-cancelled{background:var(--chip);color:var(--muted)}
   .b-done{background:rgba(31,157,85,.14);color:var(--ok)}
   .b-failed{background:rgba(209,69,59,.14);color:var(--bad)}
   .b-unknown{background:var(--chip);color:var(--muted)}
@@ -75,6 +77,14 @@
   tr.dl td{opacity:.55}
   .dlmark{color:var(--ok);font-weight:700}
   .jobitem{margin:2px 0;font-size:12.5px}
+  #trainbar{position:sticky;top:0;z-index:20;background:var(--panel);
+    border-bottom:1px solid var(--run);padding:10px 22px;box-shadow:var(--shadow);
+    font-size:13px}
+  #trainbar .tbrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  #trainbar .stat{white-space:nowrap}
+  #trainbar .stat b{font-weight:640}
+  .pbar{flex:1;min-width:140px;height:8px;background:var(--chip);border-radius:5px;overflow:hidden}
+  .pbar>div{height:100%;background:var(--run);border-radius:5px;transition:width .6s}
 </style>
 </head>
 <body>
@@ -83,6 +93,7 @@
   <span class="sub" id="paths"></span>
   <button class="right" onclick="refresh()">↻ Refresh</button>
 </header>
+<div id="trainbar" style="display:none"></div>
 <div class="wrap">
   <div class="tiles" id="tiles"></div>
 
@@ -180,7 +191,27 @@
   </section>
 
   <section>
+    <h2>Reset &amp; retrain from scratch <span class="count">— danger</span></h2>
+    <div class="banner">⚠ Deletes both voice checkpoints, prepared &amp; staged datasets, and clears
+      training history, then trains both voices <b>from the base model</b> on every MKV in the downloads
+      folder (newest first). The newest clip becomes the TTS reference — restart the TTS worker afterward.</div>
+    <div class="row">
+      <label>Epochs</label><input id="resetEpochs" type="number" value="100" style="width:80px">
+      <button class="primary right" onclick="resetRetrain()"
+        style="background:var(--bad);border-color:var(--bad)">↺ Reset &amp; retrain from scratch</button>
+    </div>
+  </section>
+
+  <section>
     <h2>Processing history <span class="count" id="jobCount"></span></h2>
+    <div class="row" id="trainControls" style="gap:8px;align-items:center">
+      <span class="muted" style="font-size:12px">Training queue:</span>
+      <span id="trainState" class="badge"></span>
+      <button id="pauseBtn" onclick="trainControl('pause')">⏸ Pause</button>
+      <button id="resumeBtn" onclick="trainControl('resume')">▶ Resume</button>
+      <button onclick="trainControl('stop')" style="border-color:var(--bad);color:var(--bad)">⏹ Stop current</button>
+      <button onclick="trainControl('stop_all')" style="border-color:var(--bad);color:var(--bad)">⏹ Stop all</button>
+    </div>
     <div class="scroll"><table id="jobTable"><thead><tr>
       <th>When</th><th>Kind</th><th>Status</th><th>Clip title</th><th>Video ID</th><th></th>
     </tr></thead><tbody></tbody></table></div>
@@ -197,7 +228,7 @@
 </div>
 
 <script>
-let STATE={history:[],analysis:null,jobs:[],config:{},downloaded:[],trained_ids:[],clip_status:{},training_queue:[],downloads:{}};
+let STATE={history:[],analysis:null,jobs:[],config:{},downloaded:[],trained_ids:[],clip_status:{},training_queue:[],downloads:{},train_paused:false};
 const basename=s=>s?String(s).split(/[\\/]/).pop():'';
 let epochsInit=false;
 const $=s=>document.querySelector(s);
@@ -224,7 +255,33 @@ async function refresh(){
   STATE=await (await fetch('/api/state')).json();
   $('#paths').textContent=STATE.config.work_dir||'';
   if(!epochsInit&&STATE.config.default_epochs){$('#epochs').value=STATE.config.default_epochs;epochsInit=true;}
-  renderTiles();renderActivity();renderAnalysis();renderQueue();renderJobs();renderHistory();renderDlBanner();updateModeHelp();renderTtsSpeakers();
+  renderTiles();renderActivity();renderAnalysis();renderQueue();renderJobs();renderHistory();renderDlBanner();updateModeHelp();renderTtsSpeakers();renderTrainControls();renderTrainBar();
+}
+function fmtEta(s){if(s==null)return'—';
+  const h=Math.floor(s/3600),m=Math.floor(s%3600/60);
+  return h?`${h}h ${m}m`:(m?`${m}m ${Math.floor(s%60)}s`:`${Math.floor(s)}s`);}
+function renderTrainBar(){
+  const bar=$('#trainbar'),p=STATE.training_progress,g=STATE.gpu;
+  if(!p){bar.style.display='none';bar.innerHTML='';return;}
+  bar.style.display='block';
+  const gpu=g?`GPU <b>${g.util}%</b> · VRAM <b>${(g.mem_used/1024).toFixed(1)}/${(g.mem_total/1024).toFixed(0)} GB</b>`:'GPU —';
+  let mid,overall=null;
+  if(p.epoch!=null){
+    const stageFrac=((p.epoch-1)*p.steps+p.step)/(p.epochs*p.steps);
+    overall=(((p.stage_num||1)-1)+stageFrac)/(p.total_stages||1);
+    mid=`Epoch <b>${p.epoch}/${p.epochs}</b> · step <b>${p.step}/${p.steps}</b>`+
+      (p.loss!=null?` · loss <b>${p.loss}</b>`:'')+
+      (p.rate!=null?` · <b>${p.rate}</b> upd/s`:'')+
+      ` · ETA <b>${fmtEta(p.eta_seconds)}</b>`;
+  }else mid='preparing datasets… (diarization / filtering — progress appears when training starts)';
+  const voice=p.gender?`${p.gender} (${p.dataset})${p.total_stages>1?` · stage ${p.stage_num}/${p.total_stages}`:''}`:'starting…';
+  bar.innerHTML=`<div class="tbrow">`+
+    `<span class="spin"></span><span class="badge b-running">training</span>`+
+    `<span class="stat">Voice: <b>${escapeHtml(voice)}</b></span>`+
+    `<span class="stat">${mid}</span>`+
+    (overall!=null?`<div class="pbar"><div style="width:${(overall*100).toFixed(1)}%"></div></div>`+
+      `<span class="stat"><b>${(overall*100).toFixed(1)}%</b> overall</span>`:'')+
+    `<span class="stat muted">${gpu}</span></div>`;
 }
 function renderTtsSpeakers(){
   const sel=$('#ttsSpeaker'),cur=sel.value;sel.innerHTML='';
@@ -394,7 +451,7 @@ function renderJobs(){
   // even before per-item results are parsed (running / older jobs).
   const titleMap={};(STATE.analysis?STATE.analysis.clips:[]).forEach(c=>{titleMap[c.video_id]=c.title;});
   const kindLabel={analyze:'playlist analysis',retrain:'retrain',
-    'retrain-append':'retrain (append)',download:'download'};
+    'retrain-append':'retrain (append)','reset-retrain':'reset & retrain',download:'download'};
   function jobItems(j){
     if(Array.isArray(j.items)&&j.items.length) return j.items;   // parsed results
     const ids=[...(j.cmd||'').matchAll(/YTDL_ID=([^']+)/g)].map(m=>m[1]);  // derive from cmd markers
@@ -411,6 +468,11 @@ function renderJobs(){
     const tr=el('tr');
     const btn=el('button',null,'log');btn.onclick=()=>showLog(j.id);
     const td=el('td');td.append(btn);
+    if(isTraining(j.kind)&&(j.status==='queued'||j.status==='running')){
+      const stop=el('button',null,j.status==='queued'?'remove':'stop');
+      stop.style.marginLeft='6px';stop.style.borderColor='var(--bad)';stop.style.color='var(--bad)';
+      stop.onclick=()=>trainControl('stop',j.id);td.append(stop);
+    }
     let titleCell,idCell='';
     if(j.kind==='download'){
       const items=jobItems(j);
@@ -478,10 +540,32 @@ async function startRetrain(mkvsOverride){
   const j=await post('/api/retrain',{mkvs,mode,train:$('#train').value,epochs:+$('#epochs').value});
   showLog(j.id);pollJob(j.id).then(refresh);
 }
+async function resetRetrain(){
+  if(!confirm('Reset & retrain from scratch?\n\nThis DELETES both voice checkpoints, prepared & staged datasets, '+
+    'and clears training history, then retrains both voices from the base model on EVERY MKV in the downloads '+
+    'folder. Continue?'))return;
+  const j=await post('/api/reset_retrain',{epochs:+($('#resetEpochs').value||100),train:'both'});
+  showLog(j.id);pollJob(j.id).then(refresh);
+}
+function isTraining(k){return k==='retrain'||k==='retrain-append'||k==='reset-retrain';}
+async function trainControl(action,id){
+  if(action==='stop_all'&&!confirm('Stop ALL queued and running training jobs?'))return;
+  const r=await post('/api/train_control',id?{action,id}:{action});
+  if(r&&r.error){alert(r.error);return;}
+  refresh();
+}
+function renderTrainControls(){
+  const paused=!!STATE.train_paused;
+  const badge=$('#trainState');
+  badge.textContent=paused?'paused':'active';
+  badge.className='badge '+(paused?'b-queued':'b-running');
+  $('#pauseBtn').style.display=paused?'none':'';
+  $('#resumeBtn').style.display=paused?'':'none';
+}
 async function pollJob(id){
   while(true){const j=await (await fetch('/api/jobs/'+id)).json();
-    if($('#joblog').style.display==='block')$('#joblog').textContent=j.logtext||'';
-    if(j.status!=='running')return j;await new Promise(r=>setTimeout(r,1500));}
+    if($('#joblog').style.display==='block')$('#joblog').textContent=j.logtext||'(queued — waiting for the current training job to finish)';
+    if(j.status!=='running'&&j.status!=='queued')return j;await new Promise(r=>setTimeout(r,1500));}
 }
 function updateModeHelp(){
   const append=$('#mode').value==='append';
@@ -491,7 +575,7 @@ function updateModeHelp(){
 }
 $('#mode').onchange=updateModeHelp;
 function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-refresh();setInterval(()=>{if(STATE.jobs.some(j=>j.status==='running'))refresh();},4000);
+refresh();setInterval(refresh,3000);
 </script>
 </body>
 </html>
