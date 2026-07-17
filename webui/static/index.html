@@ -142,6 +142,9 @@
     </div>
     <div class="row">
       <label>Voice</label><select id="ttsSpeaker"></select>
+      <label>Speed</label>
+      <input id="ttsSpeed" type="number" min="0.3" max="2" step="0.05" value="1.0"
+        title="pacing: 1.0 = normal, lower = slower" style="width:64px">
       <label>Output dir</label>
       <input class="grow" id="ttsOutDir" placeholder="optional — default: work/tts_out">
       <button class="primary" id="ttsBtn" onclick="generateTts()">🔊 Generate</button>
@@ -231,6 +234,7 @@ async function generateTts(){
   if(!text)return alert('Enter text to speak');
   const body={text,speaker:$('#ttsSpeaker').value};
   const dir=$('#ttsOutDir').value.trim();if(dir)body.out_dir=dir;
+  const speed=parseFloat($('#ttsSpeed').value);if(speed&&speed!==1)body.speed=speed;
   const btn=$('#ttsBtn');btn.disabled=true;
   $('#ttsStatus').textContent='synthesizing… (a few seconds on GPU)';
   try{

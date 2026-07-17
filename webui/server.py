@@ -394,7 +394,7 @@ def _tts_speaker(speaker):
     return entry, ckpt
 
 
-def synth_tts(text, speaker, out_path=None, out_dir=None):
+def synth_tts(text, speaker, out_path=None, out_dir=None, speed=None):
     """Run F5-TTS for one utterance in the given trained voice and return the WAV path.
     Blocks until synthesis completes (a few seconds on-GPU). If out_path is given, the
     audio is written there (must be a .wav); if out_dir is given, it lands there as
@@ -404,6 +404,13 @@ def synth_tts(text, speaker, out_path=None, out_dir=None):
         raise ValueError("text is empty")
     if len(text) > 2000:
         raise ValueError("text too long (max 2000 chars)")
+    if speed is not None:
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            raise ValueError(f"speed must be a number, got {speed!r}")
+        if not 0.3 <= speed <= 2.0:
+            raise ValueError(f"speed must be between 0.3 and 2.0, got {speed}")
     entry, ckpt = _tts_speaker(speaker)
     out_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     if not out_path and out_dir:
@@ -428,6 +435,8 @@ def synth_tts(text, speaker, out_path=None, out_dir=None):
             ref_text = Path(rt).read_text(encoding="utf-8").strip()
         ref = f"-RefAudio '{entry['ref_audio']}' -RefText '{ref_text}'"
     cmd = (f"& '{script}' {ref} -CkptFile '{ckpt}' -GenText '{text}' -OutFile '{out_path}'")
+    if speed is not None:
+        cmd += f" -Speed {speed}"
     argv = [cfg("powershell", "pwsh"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd]
     logf = tts_out_dir() / f"{out_id}.log"
     with open(logf, "w", encoding="utf-8", errors="replace") as lf:
@@ -530,7 +539,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send({"error": "missing 'speaker'"}, 400)
                 try:
                     out_id, out_path = synth_tts(b.get("text"), b.get("speaker"),
-                                                 b.get("out_path"), b.get("out_dir"))
+                                                 b.get("out_path"), b.get("out_dir"),
+                                                 b.get("speed"))
                 except ValueError as e:
                     return self._send({"error": str(e)}, 400)
                 except RuntimeError as e:
