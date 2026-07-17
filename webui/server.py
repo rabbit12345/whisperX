@@ -369,6 +369,36 @@ def build_download(video_ids):
 
 
 # --- TTS inference (synchronous) ---------------------------------------------
+def _tts_via_worker(text, speaker, out_path, speed, pause_spaces):
+    """Ask the persistent tts_worker.py (models pre-loaded on GPU) to synthesize.
+    Returns True on success, False if the worker isn't running / doesn't have
+    this speaker (caller falls back to the PowerShell path). Raises on an actual
+    synthesis error reported by the worker."""
+    import socket
+    port = int(cfg("tts_worker_port", 8757))
+    req = {"op": "tts", "text": text, "speaker": str(speaker),
+           "out_path": str(out_path), "speed": speed, "pause_spaces": pause_spaces}
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.settimeout(300)  # synthesis itself is seconds; be generous
+            s.sendall(json.dumps(req).encode("utf-8") + b"\n")
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+    except OSError:
+        return False  # worker not running
+    resp = json.loads(buf.decode("utf-8"))
+    if resp.get("ok"):
+        return True
+    err = resp.get("error", "")
+    if "not loaded" in err:
+        return False  # speaker missing in worker (e.g. ref clip not cut yet)
+    raise RuntimeError(f"TTS worker error: {err}")
+
+
 def tts_out_dir():
     d = work_dir() / "tts_out"
     d.mkdir(parents=True, exist_ok=True)
@@ -394,7 +424,7 @@ def _tts_speaker(speaker):
     return entry, ckpt
 
 
-def synth_tts(text, speaker, out_path=None, out_dir=None, speed=None):
+def synth_tts(text, speaker, out_path=None, out_dir=None, speed=None, pause_spaces=None):
     """Run F5-TTS for one utterance in the given trained voice and return the WAV path.
     Blocks until synthesis completes (a few seconds on-GPU). If out_path is given, the
     audio is written there (must be a .wav); if out_dir is given, it lands there as
@@ -411,6 +441,13 @@ def synth_tts(text, speaker, out_path=None, out_dir=None, speed=None):
             raise ValueError(f"speed must be a number, got {speed!r}")
         if not 0.3 <= speed <= 2.0:
             raise ValueError(f"speed must be between 0.3 and 2.0, got {speed}")
+    if pause_spaces is not None:
+        try:
+            pause_spaces = int(pause_spaces)
+        except (TypeError, ValueError):
+            raise ValueError(f"pause_spaces must be an integer, got {pause_spaces!r}")
+        if not 0 <= pause_spaces <= 10:
+            raise ValueError(f"pause_spaces must be between 0 and 10, got {pause_spaces}")
     entry, ckpt = _tts_speaker(speaker)
     out_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     if not out_path and out_dir:
@@ -422,6 +459,10 @@ def synth_tts(text, speaker, out_path=None, out_dir=None, speed=None):
         out_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         out_path = tts_out_dir() / f"{out_id}.wav"
+    # Fast path: persistent GPU worker (tts_worker.py) with models pre-loaded.
+    if _tts_via_worker(text, speaker, out_path, speed, pause_spaces):
+        return out_id, out_path
+    # Fallback: full Invoke-VoiceClone.ps1 pipeline (cold start, ~20-30s).
     script = os.path.join(cfg("scripts_dir"), "Invoke-VoiceClone.ps1")
     if entry.get("mkv"):
         # Anchor to the source recording: diarize (cached) + select this speaker's
@@ -437,6 +478,8 @@ def synth_tts(text, speaker, out_path=None, out_dir=None, speed=None):
     cmd = (f"& '{script}' {ref} -CkptFile '{ckpt}' -GenText '{text}' -OutFile '{out_path}'")
     if speed is not None:
         cmd += f" -Speed {speed}"
+    if pause_spaces is not None:
+        cmd += f" -PauseSpaces {pause_spaces}"
     argv = [cfg("powershell", "pwsh"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd]
     logf = tts_out_dir() / f"{out_id}.log"
     with open(logf, "w", encoding="utf-8", errors="replace") as lf:
@@ -540,7 +583,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     out_id, out_path = synth_tts(b.get("text"), b.get("speaker"),
                                                  b.get("out_path"), b.get("out_dir"),
-                                                 b.get("speed"))
+                                                 b.get("speed"), b.get("pause_spaces"))
                 except ValueError as e:
                     return self._send({"error": str(e)}, 400)
                 except RuntimeError as e:
