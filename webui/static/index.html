@@ -135,6 +135,25 @@
   </section>
 
   <section>
+    <h2>Generate speech <span class="count">— synthesize with a trained voice</span></h2>
+    <div class="row">
+      <textarea id="ttsText" class="grow" rows="3" placeholder="Text to speak…"
+        style="font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);resize:vertical"></textarea>
+    </div>
+    <div class="row">
+      <label>Voice</label><select id="ttsSpeaker"></select>
+      <label>Output dir</label>
+      <input class="grow" id="ttsOutDir" placeholder="optional — default: work/tts_out">
+      <button class="primary" id="ttsBtn" onclick="generateTts()">🔊 Generate</button>
+    </div>
+    <div class="row" id="ttsResult" style="display:none">
+      <audio id="ttsAudio" controls></audio>
+      <span class="mono muted" id="ttsPath"></span>
+    </div>
+    <div class="muted" id="ttsStatus" style="font-size:12.5px"></div>
+  </section>
+
+  <section>
     <h2>Retrain <span class="count">— fine-tune from MKVs</span></h2>
     <div class="row">
       <input class="grow" id="mkvInput" placeholder="MKV paths, comma-separated (or leave blank to use selected downloads)">
@@ -199,7 +218,30 @@ async function refresh(){
   STATE=await (await fetch('/api/state')).json();
   $('#paths').textContent=STATE.config.work_dir||'';
   if(!epochsInit&&STATE.config.default_epochs){$('#epochs').value=STATE.config.default_epochs;epochsInit=true;}
-  renderTiles();renderActivity();renderAnalysis();renderQueue();renderJobs();renderHistory();renderDlBanner();updateModeHelp();
+  renderTiles();renderActivity();renderAnalysis();renderQueue();renderJobs();renderHistory();renderDlBanner();updateModeHelp();renderTtsSpeakers();
+}
+function renderTtsSpeakers(){
+  const sel=$('#ttsSpeaker'),cur=sel.value;sel.innerHTML='';
+  Object.entries(STATE.tts_speakers||{}).forEach(([k,label])=>{
+    const o=document.createElement('option');o.value=k;o.textContent=label;sel.append(o);});
+  if(cur)sel.value=cur;
+}
+async function generateTts(){
+  const text=$('#ttsText').value.trim();
+  if(!text)return alert('Enter text to speak');
+  const body={text,speaker:$('#ttsSpeaker').value};
+  const dir=$('#ttsOutDir').value.trim();if(dir)body.out_dir=dir;
+  const btn=$('#ttsBtn');btn.disabled=true;
+  $('#ttsStatus').textContent='synthesizing… (a few seconds on GPU)';
+  try{
+    const j=await post('/api/tts',body);
+    $('#ttsStatus').textContent='';
+    $('#ttsResult').style.display='flex';
+    $('#ttsPath').textContent=j.out_path;
+    if(j.url){const a=$('#ttsAudio');a.src=j.url;a.style.display='';a.play().catch(()=>{});}
+    else $('#ttsAudio').style.display='none';
+  }catch(e){$('#ttsStatus').textContent='';}
+  finally{btn.disabled=false;}
 }
 function renderQueue(){
   const q=STATE.training_queue||[],status=cs();

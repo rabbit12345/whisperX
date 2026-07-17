@@ -8,5 +8,19 @@
   "download_cmd": "& 'X:/code/python/YtubeDownloader/venv/Scripts/python.exe' 'X:/code/python/YtubeDownloader/cli.py' '{video_id}' -o '{out_dir}' --json",
   "hf_token_env": "HF_TOKEN",
   "default_epochs": 100,
-  "powershell": "pwsh"
+  "powershell": "pwsh",
+  "tts": {
+    "0": {
+      "label": "female (s0)",
+      "ckpt": "C:/Users/miffy/Documents/whisperX/.venv-f5/Lib/ckpts/s0/model_last.pt",
+      "mkv": "C:/Users/miffy/Documents/whisperX/downloads/#448｜夏日枉然回憶.mkv",
+      "speaker": 0
+    },
+    "1": {
+      "label": "male (s1)",
+      "ckpt": "C:/Users/miffy/Documents/whisperX/.venv-f5/Lib/ckpts/s1/model_last.pt",
+      "mkv": "C:/Users/miffy/Documents/whisperX/downloads/#448｜夏日枉然回憶.mkv",
+      "speaker": 1
+    }
+  }
 }

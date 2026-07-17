@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -367,6 +368,77 @@ def build_download(video_ids):
     return argv, script, dict(os.environ)
 
 
+# --- TTS inference (synchronous) ---------------------------------------------
+def tts_out_dir():
+    d = work_dir() / "tts_out"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _tts_speaker(speaker):
+    """Resolve a speaker number to its pinned config entry, validating that the
+    checkpoint and the reference source (an MKV to diarize, or a pre-cut clip) exist."""
+    table = CONFIG.get("tts") or {}
+    key = str(speaker)
+    entry = table.get(key)
+    if not entry:
+        raise ValueError(f"unknown speaker {speaker!r}; valid: {sorted(table.keys())}")
+    ckpt = entry.get("ckpt")
+    if not ckpt or not os.path.exists(ckpt):
+        raise ValueError(f"speaker {key}: ckpt not found on disk: {ckpt}")
+    # Reference source: prefer anchoring to the source MKV (re-select the ref clip via
+    # cached diarization each call); fall back to a pinned pre-cut ref_audio clip.
+    src = entry.get("mkv") or entry.get("ref_audio")
+    if not src or not os.path.exists(src):
+        raise ValueError(f"speaker {key}: reference source not found on disk: {src}")
+    return entry, ckpt
+
+
+def synth_tts(text, speaker, out_path=None, out_dir=None):
+    """Run F5-TTS for one utterance in the given trained voice and return the WAV path.
+    Blocks until synthesis completes (a few seconds on-GPU). If out_path is given, the
+    audio is written there (must be a .wav); if out_dir is given, it lands there as
+    <id>.wav; otherwise it lands in work/tts_out/<id>.wav."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("text is empty")
+    if len(text) > 2000:
+        raise ValueError("text too long (max 2000 chars)")
+    entry, ckpt = _tts_speaker(speaker)
+    out_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    if not out_path and out_dir:
+        out_path = Path(out_dir) / f"{out_id}.wav"
+    if out_path:
+        out_path = Path(out_path)
+        if out_path.suffix.lower() != ".wav":
+            raise ValueError("out_path must end in .wav")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        out_path = tts_out_dir() / f"{out_id}.wav"
+    script = os.path.join(cfg("scripts_dir"), "Invoke-VoiceClone.ps1")
+    if entry.get("mkv"):
+        # Anchor to the source recording: diarize (cached) + select this speaker's
+        # reference clip fresh, so the reference tracks the actual #448 audio.
+        spk = int(entry.get("speaker", speaker))
+        ref = f"-Mkv '{entry['mkv']}' -Speaker {spk}"
+    else:
+        ref_text = ""
+        rt = entry.get("ref_text")
+        if rt and os.path.exists(rt):
+            ref_text = Path(rt).read_text(encoding="utf-8").strip()
+        ref = f"-RefAudio '{entry['ref_audio']}' -RefText '{ref_text}'"
+    cmd = (f"& '{script}' {ref} -CkptFile '{ckpt}' -GenText '{text}' -OutFile '{out_path}'")
+    argv = [cfg("powershell", "pwsh"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd]
+    logf = tts_out_dir() / f"{out_id}.log"
+    with open(logf, "w", encoding="utf-8", errors="replace") as lf:
+        p = subprocess.run(argv, stdout=lf, stderr=subprocess.STDOUT,
+                           cwd=cfg("scripts_dir"), text=True)
+    if p.returncode != 0 or not out_path.exists():
+        tail = logf.read_text(encoding="utf-8", errors="replace")[-2000:]
+        raise RuntimeError(f"TTS synthesis failed (exit {p.returncode}):\n{tail}")
+    return out_id, out_path
+
+
 def build_analyze(playlist_json=None, url=None):
     py = "python"
     script = os.path.join(cfg("scripts_dir"), "analyze_playlist.py")
@@ -418,6 +490,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({
                 "config": {k: CONFIG.get(k) for k in
                            ("work_dir", "download_dir", "download_cmd", "default_epochs")},
+                "tts_speakers": {k: v.get("label") or k
+                                 for k, v in (CONFIG.get("tts") or {}).items()},
                 "history": read_history(),
                 "analysis": read_json_file(analysis_path()),
                 "downloaded": sorted(_load_downloads_index().keys()),
@@ -428,6 +502,14 @@ class Handler(BaseHTTPRequestHandler):
                 "downloads": _load_downloads_index(),
                 "jobs": sorted(JOBS.values(), key=lambda j: j["started"], reverse=True)[:50],
             })
+        if path.startswith("/api/tts/"):
+            leaf = os.path.basename(path)                 # <id>.wav ; guard traversal
+            if not re.fullmatch(r"[\w.-]+\.wav", leaf):
+                return self._send({"error": "bad filename"}, 400)
+            f = tts_out_dir() / leaf
+            if not f.exists():
+                return self._send({"error": "no such audio"}, 404)
+            return self._send(f.read_bytes(), ctype="audio/wav")
         if path.startswith("/api/jobs/"):
             jid = path.rsplit("/", 1)[-1]
             job = JOBS.get(jid)
@@ -442,6 +524,29 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST ----
     def do_POST(self):
         try:
+            if self.path == "/api/tts":
+                b = self._body()
+                if "speaker" not in b:
+                    return self._send({"error": "missing 'speaker'"}, 400)
+                try:
+                    out_id, out_path = synth_tts(b.get("text"), b.get("speaker"),
+                                                 b.get("out_path"), b.get("out_dir"))
+                except ValueError as e:
+                    return self._send({"error": str(e)}, 400)
+                except RuntimeError as e:
+                    return self._send({"error": str(e)}, 500)
+                resp = {"id": out_id, "speaker": b.get("speaker"), "out_path": str(out_path)}
+                # serve playback from the tts_out dir only; if the WAV was written to a
+                # custom directory, keep a copy there so it can still play in the browser
+                if _norm(os.path.dirname(str(out_path))) == _norm(str(tts_out_dir())):
+                    resp["url"] = f"/api/tts/{os.path.basename(str(out_path))}"
+                else:
+                    try:
+                        shutil.copyfile(out_path, tts_out_dir() / f"{out_id}.wav")
+                        resp["url"] = f"/api/tts/{out_id}.wav"
+                    except OSError:
+                        pass
+                return self._send(resp)
             if self.path == "/api/analyze":
                 b = self._body()
                 argv, sh, env = build_analyze(b.get("playlist_json"), b.get("url"))
