@@ -35,6 +35,7 @@ param(
   [double]$CfgStrength = 2.0,# guidance; 2.5-3.0 hugs the reference more closely
   [double]$TargetRms = 0.1,  # output loudness normalization
   [double]$Speed = 1.0,      # pacing
+  [int]$PauseSpaces = 2,     # spaces inserted after commas; more = longer mid-sentence pauses
   [ValidateSet('vocos','bigvgan')][string]$Vocoder = 'vocos',
   [switch]$RemoveSilence,    # trim long silences in the output
   [switch]$CleanRef,         # gentle highpass + denoise + loudnorm on the reference
@@ -163,6 +164,12 @@ function Add-TerminalPunct([string]$t) {
 }
 if ($refText) { $refText = Add-TerminalPunct $refText }
 $GenText = Add-TerminalPunct $GenText
+# Duration is budgeted from gen-text length (spaces count), and the model spends
+# the slack at punctuation — padding spaces after commas lengthens those pauses.
+if ($PauseSpaces -gt 0) {
+  $pad = ' ' * $PauseSpaces
+  $GenText = $GenText -replace '([，,、；;])\s*', "`$1$pad"
+}
 
 $f5Args = @(
   '--model', $F5Model, '--ref_audio', $ref, '--ref_text', $refText,
