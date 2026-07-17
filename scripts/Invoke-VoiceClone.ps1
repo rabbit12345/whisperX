@@ -151,6 +151,19 @@ if ($AutoRefText) {
   $refText = ''
 }
 
+# F5-TTS budgets output duration from the ref-text/gen-text ratio; text without
+# terminal punctuation gets its last syllable clipped. Ensure both texts end with
+# sentence punctuation + a trailing space (per F5-TTS docs).
+function Add-TerminalPunct([string]$t) {
+  $t = $t.Trim()
+  if ($t -and ('。','．','.','!','！','?','？',';','；') -notcontains $t.Substring($t.Length - 1)) {
+    $t += if ($t -match '[一-鿿]$') { '。' } else { '.' }
+  }
+  return "$t "
+}
+if ($refText) { $refText = Add-TerminalPunct $refText }
+$GenText = Add-TerminalPunct $GenText
+
 $f5Args = @(
   '--model', $F5Model, '--ref_audio', $ref, '--ref_text', $refText,
   '--gen_text', $GenText, '--output_dir', $OutDirEff, '--output_file', $OutLeaf,
@@ -165,6 +178,15 @@ Write-Host "[4/4] F5-TTS synthesis (nfe=$NfeStep cfg=$CfgStrength vocoder=$Vocod
 if ($LASTEXITCODE -ne 0) { throw "F5-TTS failed (exit $LASTEXITCODE)." }
 
 if (Test-Path $outPath) {
+  # Append a short silence tail: F5 output often ends within milliseconds of the
+  # last syllable, which reads as an abrupt cutoff on playback.
+  $padded = "$outPath.pad.wav"
+  ffmpeg -y -v error -i $outPath -af "apad=pad_dur=0.35" -c:a pcm_s16le $padded
+  if ($LASTEXITCODE -eq 0 -and (Test-Path $padded)) {
+    Move-Item -Force $padded $outPath
+  } else {
+    Write-Warning "Output silence padding failed; keeping unpadded output."
+  }
   Write-Host "`nDONE -> $outPath" -ForegroundColor Green
 } else {
   throw "F5-TTS did not produce $outPath"

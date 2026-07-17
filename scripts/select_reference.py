@@ -128,7 +128,11 @@ def main():
 
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-i", args.audio,
-         "-ss", str(best["start"]), "-to", str(best["end"]),
+         # slight tail past the diarization end (avoids clipping the last word),
+         # then append digital silence: F5-TTS copies the reference's ending style,
+         # so a reference that ends in a clean pause yields non-abrupt output ends.
+         "-ss", str(best["start"]), "-to", str(best["end"] + 0.1),
+         "-af", "apad=pad_dur=0.4",
          "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", args.out],
         check=True,
     )
