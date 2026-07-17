@@ -59,23 +59,53 @@ def main():
     with open(args.json, encoding="utf-8") as f:
         segs = json.load(f).get("segments", [])
 
-    # Flatten to the target speaker's words (word-level timestamps), in order.
+    # Flatten to the target speaker's words (word-level timestamps), in order,
+    # and collect the OTHER speakers' word intervals so we can keep their audio
+    # out of the target's clips.
     words = []
+    other_iv = []
     for s in segs:
         for w in s.get("words", []):
-            if w.get("speaker") == target and "start" in w and "end" in w and w.get("word", "").strip():
+            if not ("start" in w and "end" in w and w.get("word", "").strip()):
+                continue
+            sp = w.get("speaker")
+            if sp == target:
                 words.append(w)
+            elif sp:
+                other_iv.append((w["start"], w["end"]))
+    other_iv.sort()
+
+    def other_in_gap(g0, g1):
+        # True if any other-speaker word overlaps the open gap (g0, g1) between
+        # two consecutive target words. A continuous audio slice across such a
+        # gap would bake the other speaker into the clip.
+        if g1 <= g0:
+            return False
+        for a, b in other_iv:
+            if a >= g1:
+                break
+            if b > g0:
+                return True
+        return False
 
     # Chunk words into clips: break at a natural pause once past target_min, or
-    # force a break at target_max. This turns long run-on segments into
-    # properly sized training clips covering the full speaker track.
+    # force a break at target_max. CRITICALLY, always break when the other
+    # speaker talks in the gap to the next target word -- otherwise the [start,
+    # end] slice would include their voice (measured 9-26% of audio otherwise).
+    # Breaking there drops that turn into the inter-clip gap, never a clip.
     clips = []            # (start, end, text)
     cur = []
     for i, w in enumerate(words):
         cur.append(w)
         dur = w["end"] - cur[0]["start"]
-        gap_next = (words[i + 1]["start"] - w["end"]) if i + 1 < len(words) else 1e9
-        if dur >= args.target_max or (dur >= args.target_min and gap_next >= args.pause):
+        if i + 1 < len(words):
+            nxt = words[i + 1]["start"]
+            gap_next = nxt - w["end"]
+            interrupted = other_in_gap(w["end"], nxt)
+        else:
+            gap_next = 1e9
+            interrupted = True
+        if dur >= args.target_max or interrupted or (dur >= args.target_min and gap_next >= args.pause):
             clips.append((cur[0]["start"], w["end"], "".join(x["word"].strip() for x in cur)))
             cur = []
     if cur:
@@ -88,8 +118,13 @@ def main():
     import glob as _glob
     wav_dir = os.path.join(args.out_dir, "wavs")
     os.makedirs(wav_dir, exist_ok=True)
-    # In append mode, continue numbering past existing clips so nothing is overwritten.
-    start_idx = len(_glob.glob(os.path.join(wav_dir, "seg_*.wav"))) if args.append else 0
+    # In append mode, continue numbering past the highest existing index so nothing
+    # is overwritten (a count would collide after the purity gate removes clips).
+    start_idx = 0
+    if args.append:
+        existing = _glob.glob(os.path.join(wav_dir, "seg_*.wav"))
+        if existing:
+            start_idx = max(int(os.path.basename(p)[4:9]) for p in existing) + 1
     rows = []
     total = 0.0
     kept = skipped = 0

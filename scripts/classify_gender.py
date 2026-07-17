@@ -53,6 +53,9 @@ def main():
     ap.add_argument("--json", required=True)
     ap.add_argument("--female-min", type=float, default=165.0,
                     help="F0 threshold used only when a file has a single speaker")
+    ap.add_argument("--min-gap", type=float, default=20.0,
+                    help="min F0 gap (Hz) between the two speakers to trust the split; "
+                         "below this the recording is skipped (prints '-1 -1')")
     args = ap.parse_args()
 
     audio, sr = sf.read(args.audio)
@@ -72,9 +75,16 @@ def main():
 
     ordered = sorted(f0s.items(), key=lambda x: -x[1])   # highest F0 first
     if len(ordered) >= 2:
-        female, male = ordered[0][0], ordered[-1][0]
-        if ordered[0][1] - ordered[-1][1] < 20:
-            eprint("WARN: F0 gap < 20 Hz; gender split is uncertain for this file.")
+        gap = ordered[0][1] - ordered[-1][1]
+        if gap < args.min_gap:
+            # Too close to tell female from male reliably -- skip the whole
+            # recording rather than risk assigning a male track to the female
+            # dataset (or vice versa).
+            eprint(f"SKIP: F0 gap {gap:.0f} Hz < {args.min_gap:.0f} Hz; gender split "
+                   "unreliable -- excluding this recording from training.")
+            female = male = None
+        else:
+            female, male = ordered[0][0], ordered[-1][0]
     else:
         lab, hz = ordered[0]
         if hz >= args.female_min:

@@ -36,6 +36,7 @@ param(
   [ValidateSet('none','tensorboard','wandb')][string]$Logger = 'none',
   [switch]$Offline,                  # force HF offline; base model must be cached
   [switch]$Force,                    # rebuild dataset even if it exists
+  [switch]$NoPurityGate,             # skip the embedding purity gate (keeps overlap-contaminated clips)
   [string]$HistoryFile               # training-history JSON (default: <WorkDir>\training_history.json)
 )
 
@@ -52,6 +53,7 @@ $F5Ft     = Join-Path $VenvRoot '.venv-f5\Scripts\f5-tts_finetune-cli.exe'
 $WhisperPy = Join-Path $VenvRoot '.venv-whisperx\Scripts\python.exe'
 $BuildPy  = Join-Path $PSScriptRoot 'build_finetune_dataset.py'
 $MatchPy  = Join-Path $PSScriptRoot 'match_speaker.py'
+$FilterPy = Join-Path $PSScriptRoot 'filter_dataset.py'
 foreach ($p in @($F5Py, $F5Ft, $BuildPy)) { if (-not (Test-Path $p)) { throw "Missing: $p" } }
 
 if (-not $HistoryFile) { $HistoryFile = Join-Path $WorkDir 'training_history.json' }
@@ -59,6 +61,18 @@ if (-not $HistoryFile) { $HistoryFile = Join-Path $WorkDir 'training_history.jso
 # --- training-history helpers ------------------------------------------------
 function Get-MkvMeta([string]$path) {
   # File size, modified date, and container duration (ffprobe) for one source MKV.
+  # The MKV may have been deleted after diarization (cached wav/json suffice for
+  # training), so metadata is best-effort.
+  if (-not (Test-Path -LiteralPath $path)) {
+    return [ordered]@{
+      mkv          = $path
+      file         = [IO.Path]::GetFileName($path)
+      size_bytes   = $null
+      size_mb      = $null
+      modified     = $null
+      duration_sec = $null
+    }
+  }
   $fi = Get-Item -LiteralPath $path
   $dur = $null
   try {
@@ -182,12 +196,29 @@ if ($Force -or -not (Test-Path (Join-Path $stage 'metadata.csv'))) {
     $j = Join-Path $WorkDir "$b.json"
     if (-not (Test-Path $a)) { throw "Missing extracted audio $a (run Invoke-VoiceClone -ListSpeakers)." }
     Write-Host "   + $b  (speaker $($src.Speaker))" -ForegroundColor DarkCyan
+    # Clips this source will add start past the highest existing index (matches the
+    # build script's append numbering, which skips gaps left by the purity gate).
+    $wavDir = Join-Path $stage 'wavs'
+    $startIdx = 0
+    if (Test-Path $wavDir) {
+      $maxIdx = Get-ChildItem $wavDir -Filter 'seg_*.wav' |
+        ForEach-Object { [int]$_.BaseName.Substring(4) } | Measure-Object -Maximum
+      if ($maxIdx.Count -gt 0) { $startIdx = [int]$maxIdx.Maximum + 1 }
+    }
     $buildArgs = @($BuildPy, '--json', $j, '--audio', $a, '--speaker', $src.Speaker, '--out-dir', $stage)
     if ($i -gt 0) { $buildArgs += '--append' }
     # Capture output (build script reports "kept N clips (M.M min)" on stderr) while still showing it.
     $buildOut = & $F5Py @buildArgs 2>&1
     if ($LASTEXITCODE -ne 0) { $buildOut | Out-Host; throw "Dataset build failed for $b (exit $LASTEXITCODE)." }
     $buildOut | Out-Host
+    if (-not $NoPurityGate) {
+      # Embedding purity gate: drop this source's clips that contain any window of
+      # the other speaker's voice (overlapped speech the word labels can't see).
+      if (-not (Test-Path $WhisperPy)) { throw "Missing: $WhisperPy (needed for purity gate)" }
+      & $WhisperPy $FilterPy --json $j --audio $a --speaker $src.Speaker `
+          --wav-dir $wavDir --meta (Join-Path $stage 'metadata.csv') --start-index $startIdx
+      if ($LASTEXITCODE -ne 0) { throw "Purity gate failed for $b (exit $LASTEXITCODE)." }
+    }
     $km = [regex]::Match(($buildOut -join "`n"), 'kept (\d+) clips \(([\d.]+) min\)')
     $meta = Get-MkvMeta $src.Mkv
     $meta.speaker      = $src.Speaker

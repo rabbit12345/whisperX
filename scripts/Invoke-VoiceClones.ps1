@@ -28,6 +28,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $HfToken) {
+  $tokenFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'HF_Token.txt'
+  if (Test-Path $tokenFile) { $HfToken = (Get-Content $tokenFile -Raw).Trim() }
+}
 $env:PYTHONUTF8 = '1'
 $env:HF_HUB_DISABLE_SYMLINKS_WARNING = '1'
 if ($Offline) {
@@ -69,7 +73,11 @@ foreach ($mkv in $Mkvs) {
   if ($LASTEXITCODE -ne 0) { throw "Gender classification failed for '$b'." }
   $idx = (($out | Select-Object -Last 1).ToString().Trim() -split '\s+')
   $femIdx, $maleIdx = $idx[0], $idx[1]
-  Write-Host ("   {0} -> female=SPEAKER_{1:d2} male=SPEAKER_{2:d2}" -f $b, [int]$femIdx, [int]$maleIdx) -ForegroundColor DarkCyan
+  if ($femIdx -eq '-1' -and $maleIdx -eq '-1') {
+    Write-Host ("   {0} -> SKIPPED (low-confidence gender split; excluded from training)" -f $b) -ForegroundColor Yellow
+  } else {
+    Write-Host ("   {0} -> female=SPEAKER_{1:d2} male=SPEAKER_{2:d2}" -f $b, [int]$femIdx, [int]$maleIdx) -ForegroundColor DarkCyan
+  }
   if ($femIdx -ne '-1') { $femaleSources += "$mkv|$femIdx" }
   if ($maleIdx -ne '-1') { $maleSources += "$mkv|$maleIdx" }
 }

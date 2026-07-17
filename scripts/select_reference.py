@@ -1,9 +1,10 @@
 """Pick a clean single-speaker reference clip from a WhisperX diarized JSON.
 
 Runs in the WhisperX venv (stdlib only + ffmpeg on PATH). Given the diarization
-JSON and the source WAV, it merges consecutive same-speaker segments into
-windows, selects the best window for the target speaker, cuts it to a 24 kHz
-mono WAV, and writes the matching reference text to <out>.txt (UTF-8).
+JSON and the source WAV, it builds windows from contiguous runs of the target
+speaker's WORDS (broken whenever the other speaker interjects, so a window never
+contains both voices), selects the best window, cuts it to a 24 kHz mono WAV,
+and writes the matching reference text to <out>.txt (UTF-8).
 
 Also prints a per-speaker talk-time summary to stderr so you can decide which
 speaker to clone.
@@ -29,27 +30,56 @@ def speaker_of(seg):
     return seg.get("speaker")
 
 
-def build_windows(segs, target, min_dur, max_dur):
-    """Greedily merge consecutive target-speaker segments into <= max_dur windows."""
-    windows = []
-    i, n = 0, len(segs)
-    while i < n:
-        if speaker_of(segs[i]) != target or "start" not in segs[i]:
-            i += 1
-            continue
-        start = segs[i]["start"]
-        end = segs[i]["end"]
-        parts = [segs[i].get("text", "").strip()]
-        j = i + 1
-        while j < n and speaker_of(segs[j]) == target:
-            if segs[j]["end"] - start > max_dur:
+def build_windows(segs, target, max_dur, pause):
+    """Build <= max_dur windows from contiguous runs of the target's words.
+
+    Uses WORD-level speaker labels, not segment labels: a single WhisperX segment
+    is a long run-on that can straddle a turn exchange, so a segment-level window
+    can contain the other voice. Here a window is broken whenever the other
+    speaker talks in the gap to the next target word (their audio would otherwise
+    land inside the continuous [start,end] slice), at a pause >= `pause`, or when
+    the next word would overflow max_dur.
+    """
+    tgt, other = [], []
+    for s in segs:
+        for w in s.get("words", []):
+            if not ("start" in w and "end" in w and w.get("word", "").strip()):
+                continue
+            sp = w.get("speaker")
+            if sp == target:
+                tgt.append(w)
+            elif sp:
+                other.append((w["start"], w["end"]))
+    other.sort()
+
+    def other_in_gap(g0, g1):
+        if g1 <= g0:
+            return False
+        for a, b in other:
+            if a >= g1:
                 break
-            end = segs[j]["end"]
-            parts.append(segs[j].get("text", "").strip())
-            j += 1
-        text = "".join(parts).strip()
-        windows.append({"start": start, "end": end, "dur": end - start, "text": text})
-        i = max(j, i + 1)
+            if b > g0:
+                return True
+        return False
+
+    def close(run):
+        return {"start": run[0]["start"], "end": run[-1]["end"],
+                "dur": run[-1]["end"] - run[0]["start"],
+                "text": "".join(x["word"].strip() for x in run)}
+
+    windows = []
+    cur = []
+    for i, w in enumerate(tgt):
+        if cur and (w["end"] - cur[0]["start"] > max_dur):
+            windows.append(close(cur)); cur = []
+        cur.append(w)
+        last = i + 1 == len(tgt)
+        if last:
+            windows.append(close(cur)); cur = []
+        else:
+            nxt = tgt[i + 1]["start"]
+            if (nxt - w["end"]) >= pause or other_in_gap(w["end"], nxt):
+                windows.append(close(cur)); cur = []
     return windows
 
 
@@ -95,6 +125,8 @@ def main():
     ap.add_argument("--out", required=True, help="output reference wav path")
     ap.add_argument("--min-dur", type=float, default=5.0)
     ap.add_argument("--max-dur", type=float, default=12.0)
+    ap.add_argument("--pause", type=float, default=0.6,
+                    help="inter-word gap (s) that ends a window (keeps refs to one utterance)")
     ap.add_argument("--max-cps", type=float, default=9.0,
                     help="max chars/sec; above this a window is treated as noise/hallucination")
     args = ap.parse_args()
@@ -103,7 +135,7 @@ def main():
     summarize(segs)
 
     target = f"SPEAKER_{int(args.speaker):02d}"
-    windows = build_windows(segs, target, args.min_dur, args.max_dur)
+    windows = build_windows(segs, target, args.max_dur, args.pause)
     if not windows:
         eprint(f"ERROR: no segments found for {target}. Check --speaker / diarization.")
         sys.exit(2)
