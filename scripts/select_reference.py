@@ -87,6 +87,11 @@ def build_windows(segs, target, max_dur, pause):
     return windows
 
 
+def cps(w):
+    """Speaking rate: non-space chars per second of the window's audio."""
+    return len("".join(w["text"].split())) / max(w["dur"], 0.1)
+
+
 def text_quality_ok(text, dur, max_cps):
     """Reject WhisperX hallucinations: abnormal char density or heavy repetition.
 
@@ -216,8 +221,12 @@ def main():
     if clean:
         # Prefer windows that end at a natural pause (not length-truncated): F5
         # mirrors the reference's ending, and mid-phrase cuts skew alignment.
-        # Then prefer the longest; tie-break on more text.
-        clean.sort(key=lambda w: (w["truncated"], -w["dur"], -len(w["text"])))
+        # Then prefer the window whose speaking rate is closest to the speaker's
+        # median: F5 paces output from the ref's chars/sec, so a slow, pause-heavy
+        # window makes every synthesis slow. Tie-break on longer duration.
+        med_cps = sorted(cps(w) for w in clean)[len(clean) // 2]
+        eprint(f"Median speaking rate over {len(clean)} clean windows: {med_cps:.2f} chars/s")
+        clean.sort(key=lambda w: (w["truncated"], abs(cps(w) - med_cps), -w["dur"]))
         best = purity_pick(clean, segs, target, args) or clean[0]
     elif in_range:
         # nothing passed the noise filter; take the lowest text-density window
@@ -229,7 +238,7 @@ def main():
                f"using longest ({best['dur']:.1f}s).")
 
     eprint(f"Chosen {target} clip: {best['start']:.2f}-{best['end']:.2f}s "
-           f"({best['dur']:.1f}s): {best['text']}")
+           f"({best['dur']:.1f}s, {cps(best):.2f} chars/s): {best['text']}")
 
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-i", args.audio,
