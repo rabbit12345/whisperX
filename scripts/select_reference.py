@@ -92,6 +92,15 @@ def cps(w):
     return len("".join(w["text"].split())) / max(w["dur"], 0.1)
 
 
+def has_aabb(text):
+    """True if the text contains an AABB reduplication (e.g. onomatopoeia like
+    屁屁砰砰). Such spans are usually performed as sound effects / laughter, and
+    F5-TTS mirrors that delivery into every synthesis, so demote these windows."""
+    t = "".join(text.split())
+    return any(a == b and c == d and a != c
+               for a, b, c, d in zip(t, t[1:], t[2:], t[3:]))
+
+
 def text_quality_ok(text, dur, max_cps):
     """Reject WhisperX hallucinations: abnormal char density or heavy repetition.
 
@@ -226,7 +235,8 @@ def main():
         # window makes every synthesis slow. Tie-break on longer duration.
         med_cps = sorted(cps(w) for w in clean)[len(clean) // 2]
         eprint(f"Median speaking rate over {len(clean)} clean windows: {med_cps:.2f} chars/s")
-        clean.sort(key=lambda w: (w["truncated"], abs(cps(w) - med_cps), -w["dur"]))
+        clean.sort(key=lambda w: (w["truncated"], has_aabb(w["text"]),
+                                  abs(cps(w) - med_cps), -w["dur"]))
         best = purity_pick(clean, segs, target, args) or clean[0]
     elif in_range:
         # nothing passed the noise filter; take the lowest text-density window
