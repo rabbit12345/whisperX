@@ -167,7 +167,7 @@ $cfg | Add-Member -Force NoteProperty venv_root    (& $fwd $InstallRoot)
 $cfg | Add-Member -Force NoteProperty download_dir (& $fwd (Join-Path $InstallRoot 'downloads'))
 if (-not $cfg.PSObject.Properties['download_cmd'])  { $cfg | Add-Member NoteProperty download_cmd '' }
 if (-not $cfg.PSObject.Properties['hf_token_env'])  { $cfg | Add-Member NoteProperty hf_token_env 'HF_TOKEN' }
-if (-not $cfg.PSObject.Properties['default_epochs']){ $cfg | Add-Member NoteProperty default_epochs 100 }
+if (-not $cfg.PSObject.Properties['default_epochs']){ $cfg | Add-Member NoteProperty default_epochs 50 }
 if (-not $cfg.PSObject.Properties['powershell'])    { $cfg | Add-Member NoteProperty powershell 'pwsh' }
 ($cfg | ConvertTo-Json -Depth 5) | Set-Content -Path $cfgPath -Encoding UTF8
 

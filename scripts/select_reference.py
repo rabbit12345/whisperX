@@ -62,24 +62,28 @@ def build_windows(segs, target, max_dur, pause):
                 return True
         return False
 
-    def close(run):
+    def close(run, truncated):
         return {"start": run[0]["start"], "end": run[-1]["end"],
                 "dur": run[-1]["end"] - run[0]["start"],
-                "text": "".join(x["word"].strip() for x in run)}
+                "text": "".join(x["word"].strip() for x in run),
+                "truncated": truncated}
 
     windows = []
     cur = []
     for i, w in enumerate(tgt):
         if cur and (w["end"] - cur[0]["start"] > max_dur):
-            windows.append(close(cur)); cur = []
+            # length-forced break: this window likely ends MID-PHRASE. Mark it so
+            # selection avoids it -- F5 mirrors the reference's ending, and a
+            # ref_text cut mid-word skews the audio/text alignment.
+            windows.append(close(cur, True)); cur = []
         cur.append(w)
         last = i + 1 == len(tgt)
         if last:
-            windows.append(close(cur)); cur = []
+            windows.append(close(cur, False)); cur = []
         else:
             nxt = tgt[i + 1]["start"]
             if (nxt - w["end"]) >= pause or other_in_gap(w["end"], nxt):
-                windows.append(close(cur)); cur = []
+                windows.append(close(cur, False)); cur = []
     return windows
 
 
@@ -117,6 +121,68 @@ def summarize(segs):
         eprint(f"  {spk}: {totals[spk]:.1f}s")
 
 
+def purity_pick(candidates, segs, target, args, max_try=8):
+    """Return the first candidate window whose audio passes the embedding purity
+    gate (same wespeaker check + thresholds as filter_dataset.py: reject when the
+    other speaker's sim >= 0.45 and the target's lead < 0.20 in any 2s window).
+    Word labels can miss overlapped speech, so the top-ranked window may still
+    carry the other voice -- this verifies acoustically. Returns None (caller
+    falls back to rank order) if pyannote is unavailable or nothing passes."""
+    try:
+        import numpy as np
+        import torch
+        from pyannote.audio import Inference, Model
+        from pyannote.core import Segment
+        import os as _os
+        tok = _os.environ.get("HF_TOKEN")
+        try:
+            model = Model.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM",
+                                          use_auth_token=tok)
+        except TypeError:
+            model = Model.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM", token=tok)
+        inf = Inference(model, window="whole",
+                        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+        def emb(a, b):
+            v = np.asarray(inf.crop(args.audio, Segment(a, b))).reshape(-1)
+            return v / (np.linalg.norm(v) + 1e-9)
+
+        cent = {}
+        for lab in sorted({s.get("speaker") for s in segs if s.get("speaker")}):
+            sp = [(s["start"], s["end"]) for s in segs
+                  if s.get("speaker") == lab and "start" in s and 3.0 <= s["end"] - s["start"] <= 15.0]
+            sp.sort(key=lambda x: -(x[1] - x[0]))
+            vs = [emb(a, b) for a, b in sp[:8]]
+            if vs:
+                c = np.mean(vs, axis=0)
+                cent[lab] = c / (np.linalg.norm(c) + 1e-9)
+        if target not in cent or len(cent) < 2:
+            return None
+        others = [c for lab, c in cent.items() if lab != target]
+
+        def window_pure(a, b):
+            t = a
+            while t + 1.0 < b:
+                e = emb(t, min(t + 2.0, b))
+                st = float(np.dot(e, cent[target]))
+                so = max(float(np.dot(e, c)) for c in others)
+                if so >= 0.45 and st - so < 0.20:
+                    return False
+                t += 2.0
+            return True
+
+        for w in candidates[:max_try]:
+            if window_pure(w["start"], w["end"]):
+                return w
+            eprint(f"  purity: skipping {w['start']:.1f}-{w['end']:.1f}s (other speaker audible)")
+        eprint(f"WARN: none of the top {min(max_try, len(candidates))} windows passed the "
+               "purity check; falling back to rank order.")
+        return None
+    except Exception as ex:  # noqa: BLE001 -- purity is best-effort, selection must not die
+        eprint(f"WARN: purity check unavailable ({ex}); using rank order.")
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", required=True)
@@ -135,17 +201,24 @@ def main():
     summarize(segs)
 
     target = f"SPEAKER_{int(args.speaker):02d}"
-    windows = build_windows(segs, target, args.max_dur, args.pause)
+    # Leave headroom under F5's hard limit: the cut adds +0.1s tail and 0.4s
+    # silence padding, and a final wav OVER max_dur makes F5 clip the audio while
+    # ref_text keeps the clipped words -- the model then SPEAKS those missing
+    # words before the requested text (garbage prefix in every synthesis).
+    cap = args.max_dur - 0.5
+    windows = build_windows(segs, target, cap, args.pause)
     if not windows:
         eprint(f"ERROR: no segments found for {target}. Check --speaker / diarization.")
         sys.exit(2)
 
-    in_range = [w for w in windows if args.min_dur <= w["dur"] <= args.max_dur]
+    in_range = [w for w in windows if args.min_dur <= w["dur"] <= cap]
     clean = [w for w in in_range if text_quality_ok(w["text"], w["dur"], args.max_cps)]
     if clean:
-        # F5-TTS clips reference to ~12s, so among clean windows prefer the
-        # longest (up to max_dur); tie-break on more text.
-        best = sorted(clean, key=lambda w: (-w["dur"], -len(w["text"])))[0]
+        # Prefer windows that end at a natural pause (not length-truncated): F5
+        # mirrors the reference's ending, and mid-phrase cuts skew alignment.
+        # Then prefer the longest; tie-break on more text.
+        clean.sort(key=lambda w: (w["truncated"], -w["dur"], -len(w["text"])))
+        best = purity_pick(clean, segs, target, args) or clean[0]
     elif in_range:
         # nothing passed the noise filter; take the lowest text-density window
         best = min(in_range, key=lambda w: len("".join(w["text"].split())) / w["dur"])

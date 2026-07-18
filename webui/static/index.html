@@ -100,35 +100,10 @@
   <div class="activity" id="activity" style="display:none"></div>
 
   <section>
-    <h2>Playlist analysis <span class="count" id="anCount"></span></h2>
-    <div id="dlBanner"></div>
-    <div class="row">
-      <input class="grow" id="plInput" placeholder="playlist JSON path (from downloader/yt-dlp -J)  or  playlist URL">
-      <button class="primary" onclick="analyze()">Analyze</button>
-      <span class="muted" id="anStatus"></span>
-    </div>
-    <div class="toolbar" id="clipTools" style="display:none">
-      <button onclick="selectAll(true)">Select all</button>
-      <button onclick="selectAll(false)">Deselect all</button>
-      <button onclick="selectUndownloadedIncludes()">✓ Undownloaded includes</button>
-      <span class="muted">tip: shift-click a checkbox to select a range</span>
-    </div>
-    <div class="muted" id="clipStatus" style="font-size:12.5px;margin-bottom:10px"></div>
-    <div class="scroll"><table id="clipTable"><thead><tr>
-      <th></th><th>Status</th><th>Title</th><th>Guest(s)</th><th>Duration</th><th>Video ID</th><th>State</th>
-    </tr></thead><tbody></tbody></table></div>
-    <div class="row" style="margin-top:12px">
-      <span class="muted" id="selCount">0 selected</span>
-      <button class="right" onclick="downloadSelected(false)">⬇ Download selected</button>
-      <button onclick="downloadSelected(true)">⬇ Download → training queue</button>
-    </div>
-  </section>
-
-  <section>
     <h2>Training queue <span class="count" id="queueCount"></span></h2>
     <div class="row">
       <button class="primary" onclick="trainQueue()">▶ Train queue (append)</button>
-      <label>Epochs</label><input id="qEpochs" type="number" value="100" style="width:80px">
+      <label>Epochs</label><input id="qEpochs" type="number" value="50" style="width:80px">
       <button onclick="clearQueue()">Clear queue</button>
       <span class="muted">appends the queued MKVs to the accumulated corpus and retrains both voices</span>
     </div>
@@ -184,21 +159,21 @@
       <label>Train</label>
       <select id="train"><option>both</option><option>female</option><option>male</option></select>
       <label>Epochs</label>
-      <input id="epochs" type="number" value="100" style="width:80px">
+      <input id="epochs" type="number" value="50" style="width:80px">
       <button class="primary right" onclick="startRetrain()">Start retrain</button>
     </div>
     <div class="muted" id="modeHelp" style="font-size:12px"></div>
   </section>
 
   <section>
-    <h2>Reset &amp; retrain from scratch <span class="count">— danger</span></h2>
+    <h2>Reset training <span class="count">— danger</span></h2>
     <div class="banner">⚠ Deletes both voice checkpoints, prepared &amp; staged datasets, and clears
-      training history, then trains both voices <b>from the base model</b> on every MKV in the downloads
-      folder (newest first). The newest clip becomes the TTS reference — restart the TTS worker afterward.</div>
+      training history. Downloaded MKVs are <b>kept</b> — episode badges reset to "downloaded"
+      (or clear if the file was removed). <b>No training is started</b>: use the Retrain section
+      above when you're ready to train from the base model.</div>
     <div class="row">
-      <label>Epochs</label><input id="resetEpochs" type="number" value="100" style="width:80px">
-      <button class="primary right" onclick="resetRetrain()"
-        style="background:var(--bad);border-color:var(--bad)">↺ Reset &amp; retrain from scratch</button>
+      <button class="primary right" onclick="resetTraining()"
+        style="background:var(--bad);border-color:var(--bad)">↺ Reset training</button>
     </div>
   </section>
 
@@ -224,6 +199,31 @@
       <th>Date</th><th>Dataset</th><th>Epochs</th><th>Train time</th><th>Clips</th>
       <th>Minutes</th><th>Sources</th>
     </tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>Playlist analysis <span class="count" id="anCount"></span></h2>
+    <div id="dlBanner"></div>
+    <div class="row">
+      <input class="grow" id="plInput" placeholder="playlist JSON path (from downloader/yt-dlp -J)  or  playlist URL">
+      <button class="primary" onclick="analyze()">Analyze</button>
+      <span class="muted" id="anStatus"></span>
+    </div>
+    <div class="toolbar" id="clipTools" style="display:none">
+      <button onclick="selectAll(true)">Select all</button>
+      <button onclick="selectAll(false)">Deselect all</button>
+      <button onclick="selectUndownloadedIncludes()">✓ Undownloaded includes</button>
+      <span class="muted">tip: shift-click a checkbox to select a range</span>
+    </div>
+    <div class="muted" id="clipStatus" style="font-size:12.5px;margin-bottom:10px"></div>
+    <div class="scroll"><table id="clipTable"><thead><tr>
+      <th></th><th>Status</th><th>Title</th><th>Guest(s)</th><th>Duration</th><th>Video ID</th><th>State</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="row" style="margin-top:12px">
+      <span class="muted" id="selCount">0 selected</span>
+      <button class="right" onclick="downloadSelected(false)">⬇ Download selected</button>
+      <button onclick="downloadSelected(true)">⬇ Download → training queue</button>
+    </div>
   </section>
 </div>
 
@@ -254,7 +254,7 @@ function elapsed(iso){if(!iso)return'';const d=Math.max(0,(Date.now()-new Date(i
 async function refresh(){
   STATE=await (await fetch('/api/state')).json();
   $('#paths').textContent=STATE.config.work_dir||'';
-  if(!epochsInit&&STATE.config.default_epochs){$('#epochs').value=STATE.config.default_epochs;epochsInit=true;}
+  if(!epochsInit&&STATE.config.default_epochs){$('#epochs').value=STATE.config.default_epochs;$('#qEpochs').value=STATE.config.default_epochs;epochsInit=true;}
   renderTiles();renderActivity();renderAnalysis();renderQueue();renderJobs();renderHistory();renderDlBanner();updateModeHelp();renderTtsSpeakers();renderTrainControls();renderTrainBar();
 }
 function fmtEta(s){if(s==null)return'—';
@@ -389,6 +389,9 @@ function renderTiles(){
   t.forEach(([k,v])=>{const d=el('div','tile');d.append(el('div','k',k),el('div','v',String(v)));$('#tiles').append(d);});
 }
 let lastIdx=null;
+// user's checkbox selection, persisted across the periodic re-renders; seeded from
+// the analysis defaults once per loaded analysis, then only changed by user clicks
+let SEL=null,selKey=null;
 function renderAnalysis(){
   const tb=$('#clipTable tbody');tb.innerHTML='';
   const a=STATE.analysis;
@@ -396,10 +399,14 @@ function renderAnalysis(){
   $('#clipTools').style.display=a?'flex':'none';
   if(!a){tb.append(el('tr','',`<td colspan=7 class=muted>No analysis yet. Enter a playlist JSON path or URL above.</td>`));updateSel();return;}
   const status=cs();lastIdx=null;
+  const key=`${a.playlist}:${a.clips.length}`;
+  if(key!==selKey){selKey=key;SEL=null;}
+  if(SEL===null)SEL=new Set(a.clips.filter(c=>c.selected&&!HANDLED.has(status[c.video_id]))
+    .map(c=>c.video_id));
   a.clips.forEach((c,i)=>{
     const st=status[c.video_id];
     const tr=el('tr',HANDLED.has(st)?'dl':'');
-    const cb=el('input');cb.type='checkbox';cb.checked=c.selected&&!HANDLED.has(st);cb.dataset.i=i;
+    const cb=el('input');cb.type='checkbox';cb.checked=SEL.has(c.video_id)&&!HANDLED.has(st);cb.dataset.i=i;
     cb.onclick=e=>onCheck(e,i);
     const td0=el('td');td0.append(cb);
     const state=stateBadge(st);
@@ -442,7 +449,19 @@ function selectedClips(){
   return [...document.querySelectorAll('#clipTable tbody input:checked')]
     .map(cb=>STATE.analysis.clips[cb.dataset.i]);
 }
-function updateSel(){const n=selectedClips().length;$('#selCount').textContent=`${n} selected`;}
+function updateSel(){
+  if(STATE.analysis)SEL=new Set(selectedClips().map(c=>c.video_id));  // persist across re-renders
+  $('#selCount').textContent=`${SEL?SEL.size:0} selected`;
+}
+// collapse long tables to the first 10 rows, with a show-all/show-fewer toggle row
+const showAll={jobs:false,hist:false};
+function moreRow(tb,cols,key,total){
+  const tr=el('tr');
+  const td=el('td','',null);td.colSpan=cols;
+  const btn=el('button',null,showAll[key]?'Show fewer':`Show all ${total} entries`);
+  btn.onclick=()=>{showAll[key]=!showAll[key];refresh();};
+  td.append(btn);tr.append(td);tb.append(tr);
+}
 function renderJobs(){
   const tb=$('#jobTable tbody');tb.innerHTML='';
   $('#jobCount').textContent=`— ${STATE.jobs.length}`;
@@ -451,7 +470,8 @@ function renderJobs(){
   // even before per-item results are parsed (running / older jobs).
   const titleMap={};(STATE.analysis?STATE.analysis.clips:[]).forEach(c=>{titleMap[c.video_id]=c.title;});
   const kindLabel={analyze:'playlist analysis',retrain:'retrain',
-    'retrain-append':'retrain (append)','reset-retrain':'reset & retrain',download:'download'};
+    'retrain-append':'retrain (append)','reset-retrain':'reset & retrain',
+    reset:'reset training',download:'download'};
   function jobItems(j){
     if(Array.isArray(j.items)&&j.items.length) return j.items;   // parsed results
     const ids=[...(j.cmd||'').matchAll(/YTDL_ID=([^']+)/g)].map(m=>m[1]);  // derive from cmd markers
@@ -464,7 +484,8 @@ function renderJobs(){
     if(j.status==='running') return '<span class="badge b-running">downloading</span>';
     return it.status?`<span class="badge b-done">${it.status}</span>`:'';
   }
-  STATE.jobs.forEach(j=>{
+  const jobsAll=STATE.jobs,jobsShown=showAll.jobs?jobsAll:jobsAll.slice(0,10);
+  jobsShown.forEach(j=>{
     const tr=el('tr');
     const btn=el('button',null,'log');btn.onclick=()=>showLog(j.id);
     const td=el('td');td.append(btn);
@@ -489,12 +510,14 @@ function renderJobs(){
       el('td','',titleCell),el('td','',idCell),td);
     tb.append(tr);
   });
+  if(jobsAll.length>10)moreRow(tb,6,'jobs',jobsAll.length);
 }
 function renderHistory(){
   const tb=$('#histTable tbody');tb.innerHTML='';
   $('#histCount').textContent=`— ${STATE.history.length}`;
   if(!STATE.history.length){tb.append(el('tr','',`<td colspan=7 class=muted>No training runs recorded yet.</td>`));return;}
-  [...STATE.history].reverse().forEach(r=>{
+  const histAll=[...STATE.history].reverse(),histShown=showAll.hist?histAll:histAll.slice(0,10);
+  histShown.forEach(r=>{
     const srcs=(r.sources||[]).map(s=>`${s.file} (spk${s.speaker}, ${s.clips_kept??'?'} clips, ${s.size_mb??'?'}MB, ${fmtDur(s.duration_sec)})`).join('<br>');
     const tr=el('tr');
     tr.append(el('td','',fmtDate(r.timestamp)),el('td','',`<span class=pill>${r.dataset}</span>`),
@@ -503,6 +526,7 @@ function renderHistory(){
       el('td','',srcs?`<details><summary>${(r.sources||[]).length} source(s)</summary>${srcs}</details>`:'—'));
     tb.append(tr);
   });
+  if(histAll.length>10)moreRow(tb,7,'hist',histAll.length);
 }
 async function showLog(id){
   const j=await (await fetch('/api/jobs/'+id)).json();
@@ -522,7 +546,11 @@ async function analyze(){
 async function downloadSelected(toQueue){
   const ids=selectedClips().map(c=>c.video_id).filter(Boolean);
   if(!ids.length)return alert('Select clips first');
-  const j=await post('/api/download',{video_ids:ids});showLog(j.id);
+  const j=await post('/api/download',{video_ids:ids});
+  if(j.skipped&&j.skipped.length)
+    $('#clipStatus').innerHTML=`<span class="dlmark">✓</span> ${j.skipped.length} already fully downloaded — skipped`;
+  if(!j.id){refresh();return;}   // everything already on disk, no job started
+  showLog(j.id);
   const done=await pollJob(j.id);
   if(toQueue&&done.produced&&done.produced.length){
     // stage the freshly downloaded clips in the training queue (train them later)
@@ -540,14 +568,13 @@ async function startRetrain(mkvsOverride){
   const j=await post('/api/retrain',{mkvs,mode,train:$('#train').value,epochs:+$('#epochs').value});
   showLog(j.id);pollJob(j.id).then(refresh);
 }
-async function resetRetrain(){
-  if(!confirm('Reset & retrain from scratch?\n\nThis DELETES both voice checkpoints, prepared & staged datasets, '+
-    'and clears training history, then retrains both voices from the base model on EVERY MKV in the downloads '+
-    'folder. Continue?'))return;
-  const j=await post('/api/reset_retrain',{epochs:+($('#resetEpochs').value||100),train:'both'});
+async function resetTraining(){
+  if(!confirm('Reset training?\n\nThis DELETES both voice checkpoints, prepared & staged datasets, and clears '+
+    'training history. Downloads are kept and NO training is started. Continue?'))return;
+  const j=await post('/api/reset',{});
   showLog(j.id);pollJob(j.id).then(refresh);
 }
-function isTraining(k){return k==='retrain'||k==='retrain-append'||k==='reset-retrain';}
+function isTraining(k){return k==='retrain'||k==='retrain-append'||k==='reset-retrain'||k==='reset';}
 async function trainControl(action,id){
   if(action==='stop_all'&&!confirm('Stop ALL queued and running training jobs?'))return;
   const r=await post('/api/train_control',id?{action,id}:{action});

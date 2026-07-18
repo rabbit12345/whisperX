@@ -28,7 +28,7 @@ param(
   [double]$LearningRate = 1e-5,
   [int]$BatchSizePerGpu = 2400,      # frames; smaller = less padding waste on variable-length clips (much faster here)
   [ValidateSet('bf16','fp16','no')][string]$Precision = 'bf16',  # 5090: bf16 ~2x faster than fp32
-  [int]$Epochs = 100,
+  [int]$Epochs = 50,
   [int]$NumWarmupUpdates = 100,
   [int]$SavePerUpdates = 200,        # checkpoint cadence; listen to samples, stop when good
   [int]$LastPerUpdates = 100,

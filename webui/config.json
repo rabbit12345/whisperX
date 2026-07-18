@@ -7,7 +7,7 @@
   "download_dir": "C:/Users/miffy/Documents/whisperX/downloads",
   "download_cmd": "& 'X:/code/python/YtubeDownloader/venv/Scripts/python.exe' 'X:/code/python/YtubeDownloader/cli.py' '{video_id}' -o '{out_dir}' --json",
   "hf_token_env": "HF_TOKEN",
-  "default_epochs": 100,
+  "default_epochs": 50,
   "powershell": "pwsh",
   "tts": {
     "0": {

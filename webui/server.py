@@ -125,7 +125,7 @@ JOBS_LOCK = threading.Lock()
 # wipes state another run is using). These kinds go through a single FIFO worker
 # instead of each spawning its own thread; everything else (download, analyze)
 # still runs concurrently.
-TRAINING_KINDS = {"retrain", "retrain-append", "reset-retrain"}
+TRAINING_KINDS = {"retrain", "retrain-append", "reset-retrain", "reset"}
 TRAIN_QUEUE = queue.Queue()
 TRAIN_PAUSED = threading.Event()   # set() => worker stops starting the NEXT job
 
@@ -338,6 +338,79 @@ def _trained_video_ids():
             if meta.get("final_path") and _norm(meta["final_path"]) in tset]
 
 
+def _episode_num(name):
+    """Leading '#NNN' episode number from a title/filename, or None."""
+    m = re.search(r"#(\d+)", name or "")
+    return m.group(1) if m else None
+
+
+def reconcile_state():
+    """Make the persisted state match what's actually on disk / in history.
+
+    (1) Heal downloads_index from disk: an .mkv present in download_dir that maps
+        to a playlist-analysis clip but isn't indexed gets an entry added, so its
+        state stops showing empty. Additive only -- never removes/overwrites a
+        valid entry.
+    (2) Persist queue pruning: rewrite training_queue.json without already-trained
+        or missing-file items (which _load_queue already hides on read), so the
+        stored file stops carrying stale entries.
+    Called on /api/state; only writes when something actually changed."""
+    # (1) index <- disk
+    dl_dir = cfg("download_dir")
+    if dl_dir and os.path.isdir(dl_dir):
+        idx = _load_downloads_index()
+        indexed = {_norm(m["final_path"]) for m in idx.values() if m.get("final_path")}
+        analysis = read_json_file(analysis_path())
+        clips = analysis.get("clips", []) if isinstance(analysis, dict) else []
+        by_title, by_num = {}, {}
+        for c in clips:
+            vid, title = c.get("video_id"), c.get("title")
+            if not vid:
+                continue
+            by_title[title] = (vid, title)
+            num = _episode_num(title)
+            if num:
+                by_num.setdefault(num, (vid, title))
+        added = {}
+        try:
+            names = os.listdir(dl_dir)
+        except OSError:
+            names = []
+        for fn in names:
+            if not fn.lower().endswith(".mkv"):
+                continue
+            full = os.path.join(dl_dir, fn)
+            if _norm(full) in indexed:
+                continue
+            stem = os.path.splitext(fn)[0]
+            match = by_title.get(stem) or by_num.get(_episode_num(stem))
+            if not match:
+                continue
+            vid, title = match
+            cur = idx.get(vid)
+            if cur and cur.get("final_path") and os.path.exists(cur["final_path"]):
+                continue                       # already has a valid file; don't clobber
+            added[vid] = {"final_path": full,
+                          "at": datetime.now().isoformat(timespec="seconds"),
+                          "title": title, "reconciled": True}
+        if added:
+            _update_downloads_index(added)
+
+    # (2) persist queue pruning
+    f = queue_path()
+    if f.exists():
+        try:
+            raw = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = None
+        if isinstance(raw, list):
+            pruned = _load_queue()
+            raw_keys = {_norm(it["mkv"]) for it in raw if it.get("mkv")}
+            new_keys = {_norm(it["mkv"]) for it in pruned if it.get("mkv")}
+            if raw_keys != new_keys:
+                _save_queue(pruned)
+
+
 # --- live training progress + GPU stats -------------------------------------
 # tqdm line from the trainer, e.g.:
 #   Epoch 100/100:  83%|... | 232/281 [01:00<00:08,  5.50update/s, loss=0.866, update=28050]
@@ -460,14 +533,17 @@ def clip_statuses():
     out = {}
     for vid, meta in idx.items():
         n = _norm(meta["final_path"]) if meta.get("final_path") else None
+        exists = bool(meta.get("final_path")) and os.path.exists(meta["final_path"])
         if n and n in trained:
             out[vid] = "trained"
         elif n and n in training_paths:
             out[vid] = "training"
-        elif vid in queued_ids or (n and n in queued_paths):
-            out[vid] = "queued"
         elif vid in downloading:
             out[vid] = "downloading"
+        elif not exists:
+            continue      # file gone (deleted/moved): no state -> selectable to redownload
+        elif vid in queued_ids or (n and n in queued_paths):
+            out[vid] = "queued"
         else:
             out[vid] = "downloaded"
     for vid in downloading:
@@ -512,30 +588,15 @@ def build_retrain(mkvs, mode, epochs, train):
     return argv, cmd, env
 
 
-def _available_mkvs_newest_first():
-    """Every .mkv currently in download_dir, newest (most recently modified) first."""
-    d = Path(cfg("download_dir"))
-    mkvs = [p for p in d.glob("*.mkv") if p.is_file()] if d.exists() else []
-    mkvs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return [str(p) for p in mkvs]
-
-
-def build_reset_retrain(epochs, train):
-    """Full reset + fresh train: wipe both voices' checkpoints/datasets and the
-    training history (Reset-Training.ps1), then fine-tune from the base model on
-    every MKV in download_dir, newest first. Returns the newest MKV too so the
-    post-run hook can pin it as the TTS reference clip."""
-    scripts = cfg("scripts_dir")
-    mkvs = _available_mkvs_newest_first()
-    if not mkvs:
-        raise ValueError(f"no .mkv files found in download_dir: {cfg('download_dir')}")
-    reset = os.path.join(scripts, "Reset-Training.ps1")
-    clones = os.path.join(scripts, "Invoke-VoiceClones.ps1")
+def build_reset():
+    """Reset only: wipe both voices' checkpoints/prepared/staged datasets and clear
+    the training history (Reset-Training.ps1). Downloads are untouched, and no
+    training is started — the user kicks off a retrain themselves afterwards."""
+    reset = os.path.join(cfg("scripts_dir"), "Reset-Training.ps1")
     cmd = (f"$ErrorActionPreference='Stop'; "
-           f"& '{reset}' -Yes -WorkDir '{cfg('work_dir')}' -VenvRoot '{cfg('venv_root')}'; "
-           f"& '{clones}' -Mkvs {ps_array(mkvs)} -Epochs {int(epochs)} -Train {train}")
+           f"& '{reset}' -Yes -WorkDir '{cfg('work_dir')}' -VenvRoot '{cfg('venv_root')}'")
     argv = [cfg("powershell", "pwsh"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd]
-    return argv, cmd, dict(os.environ), mkvs[0]
+    return argv, cmd, dict(os.environ)
 
 
 def _update_tts_reference(newest_mkv):
@@ -775,6 +836,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             return self._serve_static("index.html", "text/html; charset=utf-8")
         if path == "/api/state":
+            reconcile_state()      # heal index<-disk + persist queue pruning
             return self._send({
                 "config": {k: CONFIG.get(k) for k in
                            ("work_dir", "download_dir", "download_cmd", "default_epochs")},
@@ -848,8 +910,19 @@ class Handler(BaseHTTPRequestHandler):
                 ids = [v for v in b.get("video_ids", []) if v]
                 if not ids:
                     return self._send({"error": "no video_ids"}, 400)
+                # skip ids whose completed file is still on disk; anything else
+                # (never downloaded, or file missing/partial) gets (re)downloaded
+                idx = _load_downloads_index()
+                skipped = [v for v in ids
+                           if idx.get(v, {}).get("final_path")
+                           and os.path.exists(idx[v]["final_path"])]
+                ids = [v for v in ids if v not in skipped]
+                if not ids:
+                    return self._send({"status": "done", "skipped": skipped,
+                                       "note": "already downloaded — nothing to do"})
                 argv, sh, env = build_download(ids)
-                return self._send(start_job("download", argv, sh, env))
+                return self._send({**start_job("download", argv, sh, env),
+                                   "skipped": skipped})
             if self.path == "/api/queue":
                 return self._queue(self._body())
             if self.path == "/api/train_control":
@@ -863,12 +936,8 @@ class Handler(BaseHTTPRequestHandler):
                                               b.get("epochs", cfg("default_epochs", 100)),
                                               b.get("train", "both"))
                 return self._send(start_job("retrain", argv, sh, env))
-            if self.path == "/api/reset_retrain":
-                b = self._body()
-                argv, sh, env, newest = build_reset_retrain(
-                    b.get("epochs", cfg("default_epochs", 100)), b.get("train", "both"))
-                return self._send(start_job("reset-retrain", argv, sh, env,
-                                            meta={"newest_mkv": newest}))
+            if self.path == "/api/reset":
+                return self._send(start_job("reset", *build_reset()))
             if self.path == "/api/append":
                 b = self._body()
                 argv, sh, env = build_append(b["ref_mkv"], b.get("ref_speaker", "0"),

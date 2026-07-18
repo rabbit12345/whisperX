@@ -21,7 +21,7 @@ param(
   [string]$VenvRoot = "$env:USERPROFILE\Documents\whisperX",
   [string]$FemaleDataset = 's0',
   [string]$MaleDataset = 's1',
-  [int]$Epochs = 100,
+  [int]$Epochs = 50,
   [ValidateSet('both', 'female', 'male')][string]$Train = 'both',
   [switch]$NoTrain,                            # stop after diarize + gender preview (no training)
   [switch]$Offline
