@@ -19,8 +19,8 @@
     "1": {
       "label": "male (s1)",
       "ckpt": "C:/Users/miffy/Documents/whisperX/.venv-f5/Lib/ckpts/s1/model_last.pt",
-      "mkv": "C:/Users/miffy/Documents/whisperX/downloads/#448｜夏日枉然回憶.mkv",
-      "speaker": 1
+      "mkv": "C:/Users/miffy/Documents/whisperX/downloads/#439｜你給的沒人想要，你要的沒人能給.mkv",
+      "speaker": 0
     }
   }
 }

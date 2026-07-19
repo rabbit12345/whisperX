@@ -135,13 +135,22 @@ def summarize(segs):
         eprint(f"  {spk}: {totals[spk]:.1f}s")
 
 
-def purity_pick(candidates, segs, target, args, max_try=8):
-    """Return the first candidate window whose audio passes the embedding purity
-    gate (same wespeaker check + thresholds as filter_dataset.py: reject when the
-    other speaker's sim >= 0.45 and the target's lead < 0.20 in any 2s window).
-    Word labels can miss overlapped speech, so the top-ranked window may still
-    carry the other voice -- this verifies acoustically. Returns None (caller
-    falls back to rank order) if pyannote is unavailable or nothing passes."""
+def purity_pick(candidates, segs, target, args, max_try=None):
+    """Return the first candidate window whose audio passes the acoustic purity
+    gate. Word labels can miss overlapped speech, so the top-ranked window may
+    still carry the other voice -- this verifies acoustically with two detectors:
+
+    1. Identity margin (wespeaker) on 2s windows slid at 0.5s hops, STRICTER than
+       filter_dataset.py's clip gate (other-sim >= 0.35 or lead < 0.30 rejects):
+       a reference is a single clip F5 mirrors into every synthesis, so a brief
+       bleed diluted inside one 2s window must still fail.
+    2. Overlapped speech (pyannote segmentation-3.0, run once over the whole
+       episode): reject any candidate with > --ref-max-overlap seconds of >=2
+       simultaneously active speakers inside it. Catches simultaneous bleed the
+       identity margin can't see.
+
+    Returns None (caller falls back to rank order) if pyannote is unavailable
+    or nothing passes."""
     try:
         import numpy as np
         import torch
@@ -149,13 +158,16 @@ def purity_pick(candidates, segs, target, args, max_try=8):
         from pyannote.core import Segment
         import os as _os
         tok = _os.environ.get("HF_TOKEN")
-        try:
-            model = Model.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM",
-                                          use_auth_token=tok)
-        except TypeError:
-            model = Model.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM", token=tok)
-        inf = Inference(model, window="whole",
-                        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+        def load(name):
+            try:
+                return Model.from_pretrained(name, use_auth_token=tok)
+            except TypeError:
+                return Model.from_pretrained(name, token=tok)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        inf = Inference(load("pyannote/wespeaker-voxceleb-resnet34-LM"),
+                        window="whole", device=device)
 
         def emb(a, b):
             v = np.asarray(inf.crop(args.audio, Segment(a, b))).reshape(-1)
@@ -174,22 +186,53 @@ def purity_pick(candidates, segs, target, args, max_try=8):
             return None
         others = [c for lab, c in cent.items() if lab != target]
 
+        # Overlapped-speech activity over the whole episode, computed once.
+        # (pyannote 4.x removed pipelines.OverlappedSpeechDetection; decode the
+        # multilabel output manually, max-aggregating the sliding chunks.)
+        seg_inf = Inference(load("pyannote/segmentation-3.0"), device=device)
+        out = seg_inf(args.audio)
+        data = out.data if out.data.ndim == 3 else out.data[None]
+        n_frames = data.shape[1]
+        frame_dur = out.sliding_window.duration / n_frames
+        step = out.sliding_window.step
+        total = int(round(data.shape[0] * step / frame_dur)) + n_frames
+        act = np.zeros((total, data.shape[2]))
+        for c in range(data.shape[0]):
+            off = int(round(c * step / frame_dur))
+            end = min(off + n_frames, total)
+            act[off:end] = np.maximum(act[off:end], data[c][:end - off])
+        overlap_frames = (act > 0.5).sum(axis=1) >= 2
+
+        def overlap_sec(a, b):
+            i, j = int(a / frame_dur), int(b / frame_dur)
+            return float(overlap_frames[i:j].sum() * frame_dur)
+
         def window_pure(a, b):
+            ov = overlap_sec(a, b)
+            if ov > args.ref_max_overlap:
+                return False, f"overlapped speech {ov:.2f}s"
             t = a
-            while t + 1.0 < b:
-                e = emb(t, min(t + 2.0, b))
+            while True:
+                e0, e1 = t, min(t + 2.0, b)
+                if e1 - e0 < 1.0:
+                    break
+                e = emb(e0, e1)
                 st = float(np.dot(e, cent[target]))
                 so = max(float(np.dot(e, c)) for c in others)
-                if so >= 0.45 and st - so < 0.20:
-                    return False
-                t += 2.0
-            return True
+                if so >= 0.35 or st - so < 0.30:
+                    return False, f"other voice @{e0:.1f}s (target {st:.2f}, other {so:.2f})"
+                if e1 >= b:
+                    break
+                t += 0.5
+            return True, None
 
-        for w in candidates[:max_try]:
-            if window_pure(w["start"], w["end"]):
+        pool = candidates if max_try is None else candidates[:max_try]
+        for w in pool:
+            ok, why = window_pure(w["start"], w["end"])
+            if ok:
                 return w
-            eprint(f"  purity: skipping {w['start']:.1f}-{w['end']:.1f}s (other speaker audible)")
-        eprint(f"WARN: none of the top {min(max_try, len(candidates))} windows passed the "
+            eprint(f"  purity: skipping {w['start']:.1f}-{w['end']:.1f}s ({why})")
+        eprint(f"WARN: none of the {len(pool)} candidate windows passed the "
                "purity check; falling back to rank order.")
         return None
     except Exception as ex:  # noqa: BLE001 -- purity is best-effort, selection must not die
@@ -207,6 +250,9 @@ def main():
     ap.add_argument("--max-dur", type=float, default=12.0)
     ap.add_argument("--pause", type=float, default=0.6,
                     help="inter-word gap (s) that ends a window (keeps refs to one utterance)")
+    ap.add_argument("--ref-max-overlap", type=float, default=0.10,
+                    help="max seconds of detected overlapped speech allowed in a "
+                         "reference window (stricter than the dataset gate's 0.30)")
     ap.add_argument("--max-cps", type=float, default=9.0,
                     help="max chars/sec; above this a window is treated as noise/hallucination")
     args = ap.parse_args()
